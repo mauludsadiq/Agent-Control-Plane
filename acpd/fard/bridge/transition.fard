@@ -1,0 +1,41 @@
+import("../../src/acp/state") as state
+import("../../src/acp/policy") as policy
+import("../../src/acp/runtime") as runtime
+import("../../src/acp/receipt") as receipt
+import("std/json") as json
+import("std/io") as io
+import("std/rec") as rec
+
+// Bridge program: execute a state transition.
+// Input (via ACP_INPUT_FILE env -> read stdin equiv via io):
+// {
+//   state_json: "...",        // current workflow state JSON string
+//   policy_version: "...",    // policy version to use
+//   actor: { id, roles },
+//   kind: "human_state_edit",
+//   patches: [{ path, value }],
+//   tool_version: "human"
+// }
+
+let input_path = io.read_file("/dev/stdin")
+let raw = if rec.has(input_path, "ok") then input_path.ok else ""
+let input = json.decode(raw)
+let s = json.decode(input.state_json)
+let pol = policy.default_enterprise_policy()
+let actor_rec = runtime.actor(input.actor.id, input.actor.roles)
+
+let result = if input.kind == "human_state_edit" then
+  runtime.human_state_edit(actor_rec, s, pol, input.patches)
+else
+  runtime.transition(input.kind, actor_rec, input.input, s, pol, input.tool_version)
+
+{
+  ok: result.ok,
+  state_json: json.encode(result.state),
+  state_hash: receipt.digest(result.state),
+  receipt_json: json.encode(result.receipt),
+  receipt_digest: result.receipt.digest,
+  policy_ok: result.policy.ok,
+  violations: result.policy.violations,
+  seq: result.state.seq
+}
