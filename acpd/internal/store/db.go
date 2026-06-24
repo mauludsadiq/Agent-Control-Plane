@@ -95,11 +95,13 @@ if !strings.HasSuffix(name, ".sql") {
 continue
 }
 isPostgres := strings.HasSuffix(name, ".postgres.sql")
-if isPostgres && !d.IsPostgres() {
-continue // skip postgres-specific files on sqlite
+if isPostgres {
+if !d.IsPostgres() {
+continue // skip .postgres.sql on sqlite — use plain .sql instead
 }
-if !isPostgres && d.IsPostgres() {
-// Check if a postgres-specific version exists; if so skip this one
+// On Postgres: use .postgres.sql, skip the plain .sql counterpart
+} else if d.IsPostgres() {
+// On Postgres: skip plain .sql if a .postgres.sql version exists
 pgName := strings.TrimSuffix(name, ".sql") + ".postgres.sql"
 if _, statErr := os.Stat(MigrationDir + "/" + pgName); statErr == nil {
 continue
@@ -140,7 +142,11 @@ return fmt.Errorf("migration %s: %w", m.file, err)
 return nil
 }
 
-func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }
+func now() string {
+// SQLite datetime() requires "YYYY-MM-DD HH:MM:SS" (no T, no subseconds).
+// Postgres accepts this format too. Cross-driver safe.
+return time.Now().UTC().Format("2006-01-02 15:04:05")
+}
 
 // rebind rewrites a query with ? placeholders to use $N for Postgres.
 func (d *DB) rebind(q string) string {

@@ -16,8 +16,9 @@ func New(db *store.DB) *Queue {
 return &Queue{db: db}
 }
 
-// RequeueLoop runs in the background, periodically requeuing tasks whose
-// workers have timed out without completing.
+// RequeueLoop runs in the background, periodically:
+// 1. Requeuing tasks whose workers have timed out without heartbeating
+// 2. Dead-lettering tasks that have exhausted max_attempts
 func (q *Queue) RequeueLoop(ctx context.Context, interval time.Duration) {
 ticker := time.NewTicker(interval)
 defer ticker.Stop()
@@ -26,11 +27,11 @@ select {
 case <-ctx.Done():
 return
 case <-ticker.C:
-n, err := q.db.RequeueExpiredTasks()
+requeued, deadLettered, err := q.db.RequeueExpiredTasksWithDeadLetter()
 if err != nil {
 log.Printf("requeue: %v", err)
-} else if n > 0 {
-log.Printf("requeued %d expired tasks", n)
+} else if requeued > 0 || deadLettered > 0 {
+log.Printf("requeue: %d requeued, %d dead-lettered", requeued, deadLettered)
 }
 }
 }

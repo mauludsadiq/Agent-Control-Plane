@@ -27,6 +27,7 @@ mux.HandleFunc("/workflows/", h.handleWorkflow)
 mux.HandleFunc("/tasks/next", h.handleTaskNext)
 mux.HandleFunc("/tasks/", h.handleTask)
 mux.HandleFunc("/operator/inbox", h.handleInbox)
+mux.HandleFunc("/operator/dead-letter", h.handleDeadLetter)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -115,6 +116,8 @@ case "complete":
 h.completeTask(w, r, taskID)
 case "fail":
 h.failTask(w, r, taskID)
+case "heartbeat":
+h.heartbeatTask(w, r, taskID)
 default:
 if r.Method == http.MethodGet {
 h.getTask(w, r, taskID)
@@ -122,6 +125,20 @@ h.getTask(w, r, taskID)
 writeErr(w, http.StatusNotFound, "not found")
 }
 }
+}
+
+func (h *Handlers) handleDeadLetter(w http.ResponseWriter, r *http.Request) {
+if r.Method != http.MethodGet {
+writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+return
+}
+workflowID := r.URL.Query().Get("workflow_id")
+tasks, err := h.db.ListDeadLetterTasks(workflowID)
+if err != nil {
+writeErr(w, http.StatusInternalServerError, err.Error())
+return
+}
+writeJSON(w, http.StatusOK, map[string]any{"ok": true, "dead_letter_tasks": tasks})
 }
 
 func (h *Handlers) handleInbox(w http.ResponseWriter, r *http.Request) {

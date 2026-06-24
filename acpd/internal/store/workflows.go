@@ -125,10 +125,6 @@ s.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
 return &s, nil
 }
 
-type scanner interface {
-Scan(dest ...any) error
-}
-
 func scanWorkflow(row scanner) (*Workflow, error) {
 var wf Workflow
 var createdAt, updatedAt string

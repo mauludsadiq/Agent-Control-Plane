@@ -114,6 +114,23 @@ writeJSON(w, http.StatusOK, map[string]any{
 })
 }
 
+func (h *Handlers) heartbeatTask(w http.ResponseWriter, r *http.Request, taskID string) {
+if r.Method != http.MethodPost {
+writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+return
+}
+actor := auth.ActorFromContext(r.Context())
+if actor == nil {
+writeErr(w, http.StatusUnauthorized, "unauthorized")
+return
+}
+if err := h.db.HeartbeatTask(taskID, actor.ActorID); err != nil {
+writeErr(w, http.StatusInternalServerError, err.Error())
+return
+}
+writeJSON(w, http.StatusOK, map[string]any{"ok": true, "task_id": taskID})
+}
+
 func (h *Handlers) failTask(w http.ResponseWriter, r *http.Request, taskID string) {
 if r.Method != http.MethodPost {
 writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
