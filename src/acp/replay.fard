@@ -1,0 +1,39 @@
+import("std/list") as list
+import("std/rec") as rec
+import("runtime") as runtime
+import("receipt") as receipt
+
+fn replay(initial_state, policy_rec, actor_rec, events, tool_version) {
+  let out = list.fold(events, { ok: true, state: initial_state, receipts: [], step: 0 }, fn(acc, e) {
+    if !acc.ok then acc
+    else
+      let res = runtime.transition(e.kind, actor_rec, e.input, acc.state, policy_rec, tool_version) in
+      if res.ok then { ok: true, state: res.state, receipts: list.append(acc.receipts, res.receipt), step: acc.step + 1 }
+      else { ok: false, state: res.state, receipts: acc.receipts, step: acc.step, failed_at: acc.step, error: res.policy.violations }
+  }) in
+  { ...out, chain_root: receipt.chain_root(out.receipts) }
+}
+
+fn replay_from_checkpoint(checkpoint_state, policy_rec, actor_rec, events, tool_version) {
+  replay(checkpoint_state, policy_rec, actor_rec, events, tool_version)
+}
+
+fn compare_replay(a, b) {
+  let both_ok = a.ok && b.ok in
+  let same_state = receipt.digest(a.state) == receipt.digest(b.state) in
+  let same_chain = a.chain_root == b.chain_root in
+  {
+    equal: both_ok && same_state && same_chain,
+    both_ok: both_ok,
+    same_state: same_state,
+    same_chain: same_chain,
+    a_ok: a.ok,
+    b_ok: b.ok,
+    a_hash: receipt.digest(a.state),
+    b_hash: receipt.digest(b.state),
+    a_chain_root: a.chain_root,
+    b_chain_root: b.chain_root
+  }
+}
+
+export { replay, replay_from_checkpoint, compare_replay }

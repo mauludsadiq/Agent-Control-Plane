@@ -1,0 +1,93 @@
+import("state") as state
+import("plan") as plan
+import("policy") as policy
+import("runtime") as runtime
+import("artifact") as artifact
+import("receipt") as receipt
+import("replay") as replay
+
+fn vendor_selection_state() {
+  let g = plan.graph([
+    plan.node("goal", "Select compliant vendor", "manager", "done", "medium", "decision"),
+    plan.node("research", "Collect vendor evidence", "research_agent", "pending", "medium", "vendor_evidence"),
+    plan.node("finance", "Score price and risk", "finance_agent", "pending", "high", "scorecard"),
+    plan.node("legal", "Review contract constraints", "legal_agent", "pending", "critical", "legal_findings"),
+    plan.node("decision", "Recommend vendor", "procurement_agent", "pending", "critical", "recommendation")
+  ], [
+    plan.edge("goal", "research", "decompose goal"),
+    plan.edge("research", "finance", "evidence required"),
+    plan.edge("research", "legal", "evidence required"),
+    plan.edge("finance", "decision", "score required"),
+    plan.edge("legal", "decision", "legal clearance required")
+  ]) in
+  let s = state.new_workflow("wf_vendor_001", "Select a vendor with auditable approval and replay", "ops") in
+  state.set_plan(s, g)
+}
+
+fn run_demo() {
+  let pol = policy.default_enterprise_policy() in
+  let op = runtime.actor("manager:ops", ["operator", "manager"]) in
+  let s0 = vendor_selection_state() in
+
+  // Stage 1: operator moves to research and records candidate vendors via var. prefix
+  let r1 = runtime.human_state_edit(op, s0, pol, [
+    { path: "stage", value: "research" },
+    { path: "var.candidate_vendors", value: ["vendor:a", "vendor:b"] }
+  ]) in
+
+  // Stage 2: research agent commits evidence artifact
+  let a1 = artifact.make(
+    "summary",
+    "vendor_evidence.md",
+    "text/markdown",
+    "Vendor A and B evidence collected with source links.",
+    "research_agent",
+    receipt.digest(r1.state),
+    [{ tool: "search", ok: true }],
+    91
+  ) in
+  let r2 = runtime.commit_artifact(op, r1.state, pol, "tool-gateway-1.0.0", a1) in
+
+  // Stage 3: operator adds spend approval and advances to decision
+  let r3 = runtime.human_state_edit(op, r2.state, pol, [
+    { path: "approvals", value: { kind: "manager_spend", status: "approved", by: "manager:ops" } },
+    { path: "stage", value: "decision" }
+  ]) in
+
+  // Stage 4: scorecard artifact from finance agent
+  let a2 = artifact.make(
+    "scorecard",
+    "vendor_scorecard.json",
+    "application/json",
+    { vendor_a: 87, vendor_b: 74, recommended: "vendor:a" },
+    "finance_agent",
+    receipt.digest(r3.state),
+    [{ tool: "score_vendor", ok: true }],
+    88
+  ) in
+  let r4 = runtime.commit_artifact(op, r3.state, pol, "tool-gateway-1.0.0", a2) in
+
+  // Stage 5: final decision patch
+  let r5 = runtime.human_state_edit(op, r4.state, pol, [
+    { path: "final_decision", value: { vendor: "vendor:a", rationale: "highest score, legal cleared", decided_by: "manager:ops" } },
+    { path: "stage", value: "complete" }
+  ]) in
+
+  // Verify replay determinism
+  let events = [
+    { kind: "human_state_edit", input: { tool: "none", patches: [{ path: "stage", value: "research" }, { path: "var.candidate_vendors", value: ["vendor:a", "vendor:b"] }] } },
+    { kind: "human_state_edit", input: { tool: "none", patches: [{ path: "approvals", value: { kind: "manager_spend", status: "approved", by: "manager:ops" } }, { path: "stage", value: "decision" }] } },
+    { kind: "human_state_edit", input: { tool: "none", patches: [{ path: "final_decision", value: { vendor: "vendor:a", rationale: "highest score, legal cleared", decided_by: "manager:ops" } }, { path: "stage", value: "complete" }] } }
+  ] in
+  let replay_result = replay.replay(s0, pol, op, events, "human") in
+
+  {
+    dashboard: runtime.dashboard(r5.state, [a1, a2]),
+    replay_ok: replay_result.ok,
+    chain_root: replay_result.chain_root,
+    ready_nodes: plan.ready_nodes(r5.state.plan),
+    risk_hotspots: plan.risk_hotspots(r5.state.plan)
+  }
+}
+
+export { vendor_selection_state, run_demo }

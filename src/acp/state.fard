@@ -1,0 +1,55 @@
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+import("receipt") as receipt
+
+fn new_workflow(workflow_id, goal, owner) {
+  {
+    schema: "acp.workflow_state.v1",
+    workflow_id: workflow_id,
+    goal: goal,
+    owner: owner,
+    stage: "created",
+    seq: 0,
+    plan: { nodes: [], edges: [] },
+    artifacts: [],
+    approvals: [],
+    violations: [],
+    timeline: [],
+    variables: {},
+    final_decision: null
+  }
+}
+
+fn set_stage(state, stage) { { ...state, stage: stage } }
+fn set_variables(state, variables) { { ...state, variables: variables } }
+fn set_plan(state, plan) { { ...state, plan: plan } }
+fn add_artifact(state, artifact_digest) { { ...state, artifacts: list.append(state.artifacts, artifact_digest) } }
+fn add_approval(state, approval) { { ...state, approvals: list.append(state.approvals, approval) } }
+fn add_violation(state, violation) { { ...state, violations: list.append(state.violations, violation) } }
+fn add_timeline(state, event) { { ...state, timeline: list.append(state.timeline, event) } }
+fn bump(state) { { ...state, seq: state.seq + 1 } }
+
+fn patch_field(state, path, value) {
+  if path == "stage" then set_stage(state, value)
+  else if path == "variables" then set_variables(state, value)
+  else if path == "plan" then set_plan(state, value)
+  else if path == "final_decision" then { ...state, final_decision: value }
+  else if path == "goal" then { ...state, goal: value }
+  else if path == "owner" then { ...state, owner: value }
+  else if path == "approvals" then add_approval(state, value)
+  else if str.starts_with(path, "var.") then
+    let key = str.slice(path, 4, str.len(path)) in
+    { ...state, variables: rec.set(state.variables, key, value) }
+  else { ...state, patch_error: { path: path, value: value, code: "UNKNOWN_PATCH_PATH" } }
+}
+
+fn apply_patches(state, patches) {
+  list.fold(patches, state, fn(acc, p) { patch_field(acc, p.path, p.value) })
+}
+
+fn checkpoint(state) {
+  { seq: state.seq, workflow_id: state.workflow_id, state_hash: receipt.digest(state), stage: state.stage }
+}
+
+export { new_workflow, set_stage, set_variables, set_plan, add_artifact, add_approval, add_violation, add_timeline, bump, patch_field, apply_patches, checkpoint }

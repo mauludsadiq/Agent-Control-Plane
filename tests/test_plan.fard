@@ -1,0 +1,18 @@
+import("../src/acp/plan") as plan
+import("std/list") as list
+
+test "plan graph exposes risk hotspots" {
+  let g = plan.graph([
+    plan.node("a", "A", "agent", "done", "low", "x"),
+    plan.node("b", "B", "agent", "pending", "critical", "x")
+  ], [plan.edge("a", "b", "blocks")])
+  list.len(plan.risk_hotspots(g)) == 1
+}
+
+test "ready nodes require blockers done" {
+  let g = plan.graph([
+    plan.node("a", "A", "agent", "done", "low", "x"),
+    plan.node("b", "B", "agent", "pending", "medium", "x")
+  ], [plan.edge("a", "b", "blocks")])
+  list.len(plan.ready_nodes(g)) == 1
+}

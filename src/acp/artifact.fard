@@ -1,0 +1,67 @@
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+import("receipt") as receipt
+
+fn make(kind, name, media_type, content, producer, input_state_hash, tool_trace, confidence) {
+  let body = {
+    artifact_type: "acp.artifact.v1",
+    kind: kind,
+    name: name,
+    media_type: media_type,
+    content: content,
+    producer: producer,
+    input_state_hash: input_state_hash,
+    tool_trace: tool_trace,
+    confidence: confidence
+  } in
+  { ...body, digest: receipt.digest(body) }
+}
+
+fn card(a) {
+  {
+    name: a.name,
+    kind: a.kind,
+    producer: a.producer,
+    confidence: a.confidence,
+    digest: a.digest,
+    tool_count: list.len(a.tool_trace)
+  }
+}
+
+fn shelf(artifacts) {
+  list.map(artifacts, fn(a) { card(a) })
+}
+
+fn by_digest(artifacts, d) {
+  list.find(artifacts, fn(a) { a.digest == d })
+}
+
+fn diff_text(old_artifact, new_artifact) {
+  let old_content_digest = receipt.digest(old_artifact.content) in
+  let new_content_digest = receipt.digest(new_artifact.content) in
+  let content_changed = old_content_digest != new_content_digest in
+  let producer_changed = old_artifact.producer != new_artifact.producer in
+  let confidence_delta = new_artifact.confidence - old_artifact.confidence in
+  if !content_changed then {
+    changed: false,
+    summary: "no changes",
+    old_digest: old_artifact.digest,
+    new_digest: new_artifact.digest,
+    old_content_digest: old_content_digest,
+    new_content_digest: new_content_digest,
+    confidence_delta: confidence_delta
+  }
+  else {
+    changed: true,
+    summary: "content changed",
+    old_digest: old_artifact.digest,
+    new_digest: new_artifact.digest,
+    old_content_digest: old_content_digest,
+    new_content_digest: new_content_digest,
+    producer_changed: producer_changed,
+    confidence_delta: confidence_delta
+  }
+}
+
+export { make, card, shelf, by_digest, diff_text }

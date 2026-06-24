@@ -1,0 +1,52 @@
+import("../src/acp/control_plane") as cp
+import("../src/acp/receipt") as receipt
+import("std/rec") as rec
+
+test "control plane creates edits artifacts and dashboards workflow" {
+  let store0 = cp.empty_store()
+  let created = cp.create_workflow(store0, "wf_cp", "govern AI work", "ops")
+  let pol = cp.default_policy()
+  let actor = cp.make_actor("manager:1", ["operator", "manager"])
+  let edited = cp.edit_state(created.store, "wf_cp", actor, [{ path: "stage", value: "research" }], pol)
+  let art = cp.make_artifact("summary", "research.md", "text/markdown", "evidence", "research_agent", receipt.digest(edited.state), [{ tool: "search", ok: true }], 90)
+  let committed = cp.commit_artifact(edited.store, "wf_cp", actor, pol, "tool-gateway-1.0.0", art)
+  let dash = cp.dashboard(committed.store, "wf_cp")
+  dash.ok && dash.dashboard.stage == "research" && rec.has(committed.store.artifacts, art.digest)
+}
+
+test "control plane rejects duplicate workflow creation" {
+  let store0 = cp.empty_store()
+  let created = cp.create_workflow(store0, "wf_dup", "test", "ops")
+  let dup = cp.create_workflow(created.store, "wf_dup", "test", "ops")
+  !dup.ok && dup.code == "WORKFLOW_ALREADY_EXISTS"
+}
+
+test "control plane rejects edit on missing workflow" {
+  let store0 = cp.empty_store()
+  let pol = cp.default_policy()
+  let actor = cp.make_actor("manager:1", ["operator"])
+  let result = cp.edit_state(store0, "wf_missing", actor, [{ path: "stage", value: "active" }], pol)
+  !result.ok
+}
+
+test "control plane replay through store is deterministic" {
+  let store0 = cp.empty_store()
+  let created = cp.create_workflow(store0, "wf_replay", "replay test", "ops")
+  let pol = cp.default_policy()
+  let actor = cp.make_actor("operator:1", ["operator"])
+  let events = [
+    { kind: "human_state_edit", input: { tool: "none", patches: [{ path: "stage", value: "research" }] } },
+    { kind: "human_state_edit", input: { tool: "none", patches: [{ path: "stage", value: "review" }] } }
+  ]
+  let r1 = cp.replay_workflow(created.store, "wf_replay", pol, actor, events, "human")
+  let r2 = cp.replay_workflow(created.store, "wf_replay", pol, actor, events, "human")
+  r1.ok && r2.ok && r1.chain_verified && r1.replay.chain_root == r2.replay.chain_root
+}
+
+test "control plane unknown workflow replay returns error" {
+  let store0 = cp.empty_store()
+  let pol = cp.default_policy()
+  let actor = cp.make_actor("operator:1", ["operator"])
+  let result = cp.replay_workflow(store0, "wf_ghost", pol, actor, [], "human")
+  !result.ok
+}

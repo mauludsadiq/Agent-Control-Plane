@@ -1,0 +1,95 @@
+import("std/list") as list
+import("std/rec") as rec
+import("state") as state
+import("policy") as policy
+import("runtime") as runtime
+import("artifact") as artifact
+import("replay") as replay
+import("receipt") as receipt
+
+fn empty_store() {
+  { workflows: {}, artifacts: {}, receipts: {} }
+}
+
+fn create_workflow(store, workflow_id, goal, owner) {
+  if rec.has(store.workflows, workflow_id) then
+    { ok: false, store: store, code: "WORKFLOW_ALREADY_EXISTS", workflow_id: workflow_id }
+  else
+    let s = state.new_workflow(workflow_id, goal, owner) in
+    { ok: true, store: { ...store, workflows: rec.set(store.workflows, workflow_id, s) }, state: s }
+}
+
+fn get_workflow(store, workflow_id) {
+  if rec.has(store.workflows, workflow_id) then { ok: true, state: rec.get(store.workflows, workflow_id) }
+  else { ok: false, code: "WORKFLOW_NOT_FOUND", workflow_id: workflow_id }
+}
+
+fn save_result(store, workflow_id, result) {
+  let store1 = { ...store, workflows: rec.set(store.workflows, workflow_id, result.state) } in
+  let store2 = { ...store1, receipts: rec.set(store1.receipts, result.receipt.digest, result.receipt) } in
+  { ...result, store: store2 }
+}
+
+fn edit_state(store, workflow_id, actor_rec, patches, policy_rec) {
+  let found = get_workflow(store, workflow_id) in
+  if !found.ok then { ok: false, store: store, error: found }
+  else
+    let result = runtime.human_state_edit(actor_rec, found.state, policy_rec, patches) in
+    save_result(store, workflow_id, result)
+}
+
+fn commit_artifact(store, workflow_id, actor_rec, policy_rec, tool_version, artifact_rec) {
+  let found = get_workflow(store, workflow_id) in
+  if !found.ok then { ok: false, store: store, error: found }
+  else
+    // Ensure artifact_rec is a fully-formed artifact with a stable digest.
+    // If the caller passed a raw record without calling artifact.make, re-materialize it.
+    let safe_artifact = if rec.has(artifact_rec, "digest") then artifact_rec
+      else artifact.make(
+        artifact_rec.kind,
+        artifact_rec.name,
+        artifact_rec.media_type,
+        artifact_rec.content,
+        artifact_rec.producer,
+        artifact_rec.input_state_hash,
+        artifact_rec.tool_trace,
+        artifact_rec.confidence
+      ) in
+    let result = runtime.commit_artifact(actor_rec, found.state, policy_rec, tool_version, safe_artifact) in
+    let saved = save_result(store, workflow_id, result) in
+    { ...saved, store: { ...saved.store, artifacts: rec.set(saved.store.artifacts, safe_artifact.digest, safe_artifact) } }
+}
+
+fn dashboard(store, workflow_id) {
+  let found = get_workflow(store, workflow_id) in
+  if !found.ok then found
+  else
+    let artifacts = list.filter(
+      list.map(found.state.artifacts, fn(d) { rec.get(store.artifacts, d) }),
+      fn(a) { a != null }
+    ) in
+    { ok: true, dashboard: runtime.dashboard(found.state, artifacts) }
+}
+
+fn replay_workflow(store, workflow_id, policy_rec, actor_rec, events, tool_version) {
+  let found = get_workflow(store, workflow_id) in
+  if !found.ok then found
+  else
+    let result = replay.replay(found.state, policy_rec, actor_rec, events, tool_version) in
+    { ok: result.ok, replay: result, chain_verified: receipt.verify_chain(result.receipts, result.chain_root) }
+}
+
+fn compare_workflows(store, workflow_id_a, workflow_id_b, policy_rec, actor_rec, events, tool_version) {
+  let ra = replay_workflow(store, workflow_id_a, policy_rec, actor_rec, events, tool_version) in
+  let rb = replay_workflow(store, workflow_id_b, policy_rec, actor_rec, events, tool_version) in
+  if !ra.ok || !rb.ok then { ok: false, error: "one or both workflows not found or replay failed" }
+  else replay.compare_replay(ra.replay, rb.replay)
+}
+
+fn default_policy() { policy.default_enterprise_policy() }
+fn make_actor(id, roles) { runtime.actor(id, roles) }
+fn make_artifact(kind, name, media_type, content, producer, input_state_hash, tool_trace, confidence) {
+  artifact.make(kind, name, media_type, content, producer, input_state_hash, tool_trace, confidence)
+}
+
+export { empty_store, create_workflow, get_workflow, edit_state, commit_artifact, dashboard, replay_workflow, compare_workflows, default_policy, make_actor, make_artifact }

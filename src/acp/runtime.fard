@@ -1,0 +1,76 @@
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+import("state") as state
+import("policy") as policy
+import("receipt") as receipt
+import("timeline") as timeline
+import("artifact") as artifact
+
+fn actor(id, roles) { { id: id, roles: roles } }
+
+fn transition(kind, actor_rec, input, before_state, policy_rec, tool_version) {
+  let policy_result = policy.evaluate(policy_rec, before_state, actor_rec, input) in
+  if !policy_result.ok then
+    let v = list.head(policy_result.violations) in
+    let event = timeline.policy_violation(before_state.seq + 1, actor_rec.id, v) in
+    let after = state.bump(state.add_timeline(state.add_violation(before_state, v), event)) in
+    let r = receipt.make_state_receipt(before_state.workflow_id, after.seq, "policy_violation", actor_rec.id, before_state, input, policy_rec.version, tool_version, [], after) in
+    { ok: false, state: after, receipt: r, policy: policy_result }
+  else
+    let patched = if rec.has(input, "patches") then state.apply_patches(before_state, input.patches) else before_state in
+    let after0 = state.bump(patched) in
+    let event_digest = receipt.event_digest("state_transition", { seq: after0.seq, actor: actor_rec.id }) in
+    let event0 = timeline.state_transition(after0.seq, actor_rec.id, event_digest) in
+    let after = state.add_timeline(after0, event0) in
+    let r = receipt.make_state_receipt(before_state.workflow_id, after.seq, kind, actor_rec.id, before_state, input, policy_rec.version, tool_version, [], after) in
+    { ok: true, state: after, receipt: r, policy: policy_result }
+}
+
+fn commit_artifact(actor_rec, before_state, policy_rec, tool_version, artifact_rec) {
+  let input = { tool: "write_artifact", patches: [{ path: "stage", value: before_state.stage }] } in
+  let policy_result = policy.evaluate(policy_rec, before_state, actor_rec, input) in
+  if !policy_result.ok then transition("artifact_denied", actor_rec, input, before_state, policy_rec, tool_version)
+  else
+    let after0 = state.bump(state.add_artifact(before_state, artifact_rec.digest)) in
+    let event_digest = receipt.event_digest("state_transition", { seq: after0.seq, actor: actor_rec.id, artifact: artifact_rec.digest }) in
+    let ev = timeline.state_transition(after0.seq, actor_rec.id, event_digest) in
+    let after = state.add_timeline(after0, ev) in
+    let r = receipt.make_state_receipt(before_state.workflow_id, after.seq, "artifact_committed", actor_rec.id, before_state, input, policy_rec.version, tool_version, [artifact_rec.digest], after) in
+    { ok: true, state: after, receipt: r, artifact: artifact_rec, policy: policy_result }
+}
+
+fn human_state_edit(actor_rec, before_state, policy_rec, patches) {
+  let input = { tool: "none", patches: patches } in
+  let patched = state.apply_patches(before_state, patches) in
+  let after0 = state.bump(patched) in
+  let policy_result = policy.evaluate(policy_rec, before_state, actor_rec, input) in
+  if !policy_result.ok then
+    let v = list.head(policy_result.violations) in
+    let event = timeline.policy_violation(after0.seq, actor_rec.id, v) in
+    let after = state.add_timeline(state.add_violation(after0, v), event) in
+    let r = receipt.make_state_receipt(before_state.workflow_id, after.seq, "policy_violation", actor_rec.id, before_state, input, policy_rec.version, "human", [], after) in
+    { ok: false, state: after, receipt: r, policy: policy_result }
+  else
+    let ev = timeline.human_edit(after0.seq, actor_rec.id, patches) in
+    let after = state.add_timeline(after0, ev) in
+    let r = receipt.make_state_receipt(before_state.workflow_id, after.seq, "human_state_edit", actor_rec.id, before_state, input, policy_rec.version, "human", [], after) in
+    { ok: true, state: after, receipt: r, policy: policy_result }
+}
+
+fn dashboard(state_rec, artifacts) {
+  {
+    workflow_id: state_rec.workflow_id,
+    goal: state_rec.goal,
+    stage: state_rec.stage,
+    seq: state_rec.seq,
+    plan_graph: state_rec.plan,
+    artifact_shelf: artifact.shelf(artifacts),
+    timeline: timeline.visible(state_rec.timeline),
+    policy_violations: state_rec.violations,
+    state_hash: receipt.digest(state_rec),
+    replay_available: true
+  }
+}
+
+export { actor, transition, commit_artifact, human_state_edit, dashboard }

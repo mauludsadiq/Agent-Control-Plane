@@ -1,0 +1,33 @@
+import("std/list") as list
+import("receipt") as receipt
+
+fn event(seq, kind, actor, summary, data) {
+  let body = { seq: seq, kind: kind, actor: actor, summary: summary, data: data } in
+  { ...body, digest: receipt.digest(body) }
+}
+
+fn handoff(seq, from_agent, to_agent, task_id) {
+  event(seq, "handoff", from_agent, "agent handoff", { from_agent: from_agent, to_agent: to_agent, task_id: task_id })
+}
+
+fn tool_call(seq, agent, tool, input_digest, output_digest) {
+  event(seq, "tool_call", agent, "tool invoked", { tool: tool, input_digest: input_digest, output_digest: output_digest })
+}
+
+fn human_edit(seq, user, patches) {
+  event(seq, "human_state_edit", user, "state edited", { patches: patches })
+}
+
+fn policy_violation(seq, actor, violation) {
+  event(seq, "policy_violation", actor, violation.message, { violation: violation })
+}
+
+fn state_transition(seq, actor, receipt_digest) {
+  event(seq, "state_transition", actor, "state transition committed", { receipt_digest: receipt_digest })
+}
+
+fn visible(events) {
+  list.map(events, fn(e) { { seq: e.seq, kind: e.kind, actor: e.actor, summary: e.summary, digest: e.digest } })
+}
+
+export { event, handoff, tool_call, human_edit, policy_violation, state_transition, visible }

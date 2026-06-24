@@ -1,0 +1,4 @@
+{"cid":"sha256:59c5a68c428398b462979178a7682db6871fa3af71b4141063a12768d4d37615","kind":"rel","name":"../src/acp/plan","t":"module_resolve"}
+{"cid":"sha256:2d128f8f8ea9368d1d88d2ca9a6b1202e3e1a2cf5fd974a11b3a697cca1db448","kind":"std","name":"std/list","t":"module_resolve"}
+{"cid":"sha256:8dff43a3f5b27efa3286132064b6e04f5a2acd609e35bdb2907605fb1a984736","kind":"std","name":"std/rec","t":"module_resolve"}
+{"cid":"sha256:cc4f2843003203b7e8845a0567c22e98746472e2a2dd61e26f908b2301c66076","t":"module_graph"}

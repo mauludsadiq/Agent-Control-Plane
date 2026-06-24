@@ -1,0 +1,19 @@
+import("../src/acp/state") as state
+import("../src/acp/receipt") as receipt
+
+test "state receipt verifies exact transition" {
+  let s0 = state.new_workflow("wf_test", "test", "owner")
+  let input = { tool: "none", patches: [{ path: "stage", value: "active" }] }
+  let s1 = state.bump(state.set_stage(s0, "active"))
+  let r = receipt.make_state_receipt("wf_test", 1, "human_state_edit", "u1", s0, input, "POL1", "human", [], s1)
+  receipt.verify_state_receipt(r, s0, input, s1)
+}
+
+test "state receipt rejects different after state" {
+  let s0 = state.new_workflow("wf_test", "test", "owner")
+  let input = { tool: "none", patches: [{ path: "stage", value: "active" }] }
+  let s1 = state.bump(state.set_stage(s0, "active"))
+  let s2 = state.bump(state.set_stage(s0, "wrong"))
+  let r = receipt.make_state_receipt("wf_test", 1, "human_state_edit", "u1", s0, input, "POL1", "human", [], s1)
+  !receipt.verify_state_receipt(r, s0, input, s2)
+}

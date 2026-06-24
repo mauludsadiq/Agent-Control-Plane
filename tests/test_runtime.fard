@@ -1,0 +1,20 @@
+import("../src/acp/state") as state
+import("../src/acp/policy") as policy
+import("../src/acp/runtime") as runtime
+import("std/rec") as rec
+
+test "human state edit commits typed transition" {
+  let p = policy.default_enterprise_policy()
+  let s0 = state.new_workflow("wf_test", "test", "owner")
+  let a = runtime.actor("operator:1", ["operator"])
+  let r = runtime.human_state_edit(a, s0, p, [{ path: "stage", value: "active" }])
+  r.ok && r.state.stage == "active" && rec.has(r.receipt, "digest")
+}
+
+test "runtime surfaces policy violation card data" {
+  let p = policy.default_enterprise_policy()
+  let s0 = state.new_workflow("wf_test", "test", "owner")
+  let a = runtime.actor("viewer:1", [])
+  let r = runtime.transition("human_state_edit", a, { tool: "none", patches: [{ path: "stage", value: "active" }] }, s0, p, "human")
+  !r.ok && r.state.stage == "created"
+}

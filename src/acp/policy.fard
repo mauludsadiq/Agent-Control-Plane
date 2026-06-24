@@ -1,0 +1,105 @@
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+
+fn violation(code, message, rule_id, severity, data) {
+  { ok: false, code: code, message: message, rule_id: rule_id, severity: severity, data: data }
+}
+
+fn pass(rule_id) {
+  { ok: true, rule_id: rule_id }
+}
+
+fn has_role(actor, role) {
+  if rec.has(actor, "roles") then list.any(actor.roles, fn(r) { r == role }) else false
+}
+
+fn approval_exists(state, approval_kind) {
+  if rec.has(state, "approvals") then
+    list.any(state.approvals, fn(a) { rec.has(a, "kind") && a.kind == approval_kind && rec.has(a, "status") && a.status == "approved" })
+  else false
+}
+
+fn rule_tool_allow(rule, ctx) {
+  let allowed = rule.allowed_tools in
+  let used = if rec.has(ctx.input, "tool") then ctx.input.tool else "" in
+  if list.any(allowed, fn(t) { t == used }) then pass(rule.id)
+  else violation("POLICY_TOOL_DENIED", str.concat(["Tool not allowed: ", used]), rule.id, rule.severity, { tool: used, allowed_tools: allowed })
+}
+
+fn rule_spend_limit(rule, ctx) {
+  let amount = if rec.has(ctx.input, "amount") then ctx.input.amount else 0 in
+  if amount <= rule.max_amount then pass(rule.id)
+  else if approval_exists(ctx.state, rule.approval_kind) then pass(rule.id)
+  else violation("POLICY_APPROVAL_REQUIRED", "Spend threshold requires approval", rule.id, rule.severity, { amount: amount, max_amount: rule.max_amount, approval_kind: rule.approval_kind })
+}
+
+fn rule_required_role(rule, ctx) {
+  let used = if rec.has(ctx.input, "tool") then ctx.input.tool else "" in
+  let scoped = rec.has(rule, "applies_to") in
+  let applies = if scoped then list.any(rule.applies_to, fn(t) { t == used }) else true in
+  if !applies then pass(rule.id)
+  else if has_role(ctx.actor, rule.role) then pass(rule.id)
+  else violation("POLICY_ROLE_REQUIRED", str.concat(["Actor lacks role: ", rule.role]), rule.id, rule.severity, { role: rule.role, actor: ctx.actor.id })
+}
+
+fn rule_data_boundary(rule, ctx) {
+  let classification = if rec.has(ctx.input, "data_classification") then ctx.input.data_classification else "public" in
+  let destination = if rec.has(ctx.input, "destination") then ctx.input.destination else "internal" in
+  let blocked = list.any(rule.block, fn(b) { b.classification == classification && b.destination == destination }) in
+  if blocked then violation("POLICY_DATA_BOUNDARY", "Data boundary violation", rule.id, rule.severity, { classification: classification, destination: destination })
+  else pass(rule.id)
+}
+
+fn eval_rule(rule, ctx) {
+  if rule.kind == "tool_allow" then rule_tool_allow(rule, ctx)
+  else if rule.kind == "spend_limit" then rule_spend_limit(rule, ctx)
+  else if rule.kind == "required_role" then rule_required_role(rule, ctx)
+  else if rule.kind == "data_boundary" then rule_data_boundary(rule, ctx)
+  else violation("POLICY_UNKNOWN_RULE", str.concat(["Unknown policy rule kind: ", rule.kind]), rule.id, "high", { kind: rule.kind })
+}
+
+fn evaluate(policy, state, actor, input) {
+  let ctx = { policy: policy, state: state, actor: actor, input: input } in
+  let results = list.map(policy.rules, fn(rule) { eval_rule(rule, ctx) }) in
+  let violations = list.filter(results, fn(r) { !r.ok }) in
+  { ok: list.len(violations) == 0, version: policy.version, results: results, violations: violations }
+}
+
+// merge_policies combines two policies into one.
+// Rules from overlay are appended after base rules.
+// The merged version is "base_version+overlay_version".
+// Use this to extend the enterprise base with workflow-specific rules.
+fn merge_policies(base, overlay) {
+  {
+    version: str.concat([base.version, "+", overlay.version]),
+    rules: list.concat([base.rules, overlay.rules])
+  }
+}
+
+// scope_rule wraps an existing rule with an applies_to constraint,
+// limiting it to fire only when the input tool matches the given list.
+fn scope_rule(rule, applies_to) {
+  { ...rule, applies_to: applies_to }
+}
+
+// extend_tool_allowlist returns a new policy with additional tools permitted.
+// This avoids replacing the entire tool_allow rule — it adds a supplemental rule.
+fn extend_tool_allowlist(base_policy, rule_id, extra_tools) {
+  let extra_rule = { id: rule_id, kind: "tool_allow", severity: "high", allowed_tools: extra_tools } in
+  { ...base_policy, rules: list.append(base_policy.rules, extra_rule) }
+}
+
+fn default_enterprise_policy() {
+  {
+    version: "ACP-POLICY-1.0.0",
+    rules: [
+      { id: "tool.allow.core", kind: "tool_allow", severity: "high", allowed_tools: ["search", "read_file", "write_artifact", "score_vendor", "diff_contract", "run_tests", "none"] },
+      { id: "role.state.edit", kind: "required_role", severity: "high", role: "operator", applies_to: ["none"] },
+      { id: "spend.manager.approval", kind: "spend_limit", severity: "medium", max_amount: 5000, approval_kind: "manager_spend" },
+      { id: "data.no_pii_public", kind: "data_boundary", severity: "critical", block: [{ classification: "pii", destination: "public_model" }, { classification: "customer_secret", destination: "public_model" }] }
+    ]
+  }
+}
+
+export { violation, pass, evaluate, default_enterprise_policy, approval_exists, has_role, merge_policies, scope_rule, extend_tool_allowlist }

@@ -1,0 +1,33 @@
+import("std/list") as list
+import("std/rec") as rec
+
+fn node(id, title, agent, status, risk, output_schema) {
+  { id: id, title: title, agent: agent, status: status, risk: risk, output_schema: output_schema }
+}
+
+fn edge(from, to, reason) { { from: from, to: to, reason: reason } }
+
+fn graph(nodes, edges) { { nodes: nodes, edges: edges } }
+
+fn children(g, id) { list.filter(g.edges, fn(e) { e.from == id }) }
+fn blockers(g, id) { list.filter(g.edges, fn(e) { e.to == id }) }
+
+fn risk_hotspots(g) {
+  list.filter(g.nodes, fn(n) { n.risk == "high" || n.risk == "critical" })
+}
+
+fn ready_nodes(g) {
+  list.filter(g.nodes, fn(n) {
+    n.status == "pending" && list.all(blockers(g, n.id), fn(e) {
+      let found = list.find(g.nodes, fn(x) { x.id == e.from }) in
+      rec.has(found, "some") && found.some.status == "done"
+    })
+  })
+}
+
+fn mark_node(g, id, status) {
+  let nodes2 = list.map(g.nodes, fn(n) { if n.id == id then { ...n, status: status } else n }) in
+  { ...g, nodes: nodes2 }
+}
+
+export { node, edge, graph, children, blockers, risk_hotspots, ready_nodes, mark_node }

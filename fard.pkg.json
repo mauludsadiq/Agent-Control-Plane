@@ -1,0 +1,14 @@
+{
+  "name": "agent-control-plane",
+  "version": "1.0.0",
+  "language": "FARD v1.7.1",
+  "entry": "examples/vendor_selection.fard",
+  "tests": [
+    "tests/test_policy.fard",
+    "tests/test_receipt.fard",
+    "tests/test_plan.fard",
+    "tests/test_runtime.fard",
+    "tests/test_replay.fard",
+    "tests/test_control_plane.fard"
+  ]
+}

@@ -1,0 +1,3 @@
+import("../src/acp/sample_workflows") as samples
+
+samples.run_demo()

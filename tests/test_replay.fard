@@ -1,0 +1,57 @@
+import("../src/acp/state") as state
+import("../src/acp/policy") as policy
+import("../src/acp/runtime") as runtime
+import("../src/acp/replay") as replay
+import("../src/acp/receipt") as receipt
+
+test "replay produces same chain for same events" {
+  let p = policy.default_enterprise_policy()
+  let s0 = state.new_workflow("wf_test", "test", "owner")
+  let a = runtime.actor("operator:1", ["operator"])
+  let events = [
+    { kind: "human_state_edit", input: { tool: "none", patches: [{ path: "stage", value: "research" }] } },
+    { kind: "human_state_edit", input: { tool: "none", patches: [{ path: "var.vendor_count", value: 2 }] } }
+  ]
+  let r1 = replay.replay(s0, p, a, events, "human")
+  let r2 = replay.replay(s0, p, a, events, "human")
+  replay.compare_replay(r1, r2).equal
+}
+
+test "replay chain is verifiable" {
+  let p = policy.default_enterprise_policy()
+  let s0 = state.new_workflow("wf_test", "test", "owner")
+  let a = runtime.actor("operator:1", ["operator"])
+  let events = [
+    { kind: "human_state_edit", input: { tool: "none", patches: [{ path: "stage", value: "research" }] } }
+  ]
+  let r = replay.replay(s0, p, a, events, "human")
+  r.ok && receipt.verify_chain(r.receipts, r.chain_root)
+}
+
+test "replay halts on policy violation without poisoning chain" {
+  let p = policy.default_enterprise_policy()
+  let s0 = state.new_workflow("wf_test", "test", "owner")
+  let no_role_actor = runtime.actor("viewer:1", [])
+  let events = [
+    { kind: "human_state_edit", input: { tool: "none", patches: [{ path: "stage", value: "research" }] } }
+  ]
+  let r = replay.replay(s0, p, no_role_actor, events, "human")
+  !r.ok && r.failed_at == 0
+}
+
+test "different event sequences produce different chain roots" {
+  let p = policy.default_enterprise_policy()
+  let s0 = state.new_workflow("wf_test", "test", "owner")
+  let a = runtime.actor("operator:1", ["operator"])
+  let events_a = [
+    { kind: "human_state_edit", input: { tool: "none", patches: [{ path: "stage", value: "research" }] } },
+    { kind: "human_state_edit", input: { tool: "none", patches: [{ path: "stage", value: "review" }] } }
+  ]
+  let events_b = [
+    { kind: "human_state_edit", input: { tool: "none", patches: [{ path: "stage", value: "review" }] } },
+    { kind: "human_state_edit", input: { tool: "none", patches: [{ path: "stage", value: "research" }] } }
+  ]
+  let r_a = replay.replay(s0, p, a, events_a, "human")
+  let r_b = replay.replay(s0, p, a, events_b, "human")
+  r_a.chain_root != r_b.chain_root
+}

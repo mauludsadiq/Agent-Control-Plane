@@ -1,0 +1,78 @@
+import("../src/acp/policy") as policy
+import("../src/acp/state") as state
+import("../src/acp/runtime") as runtime
+import("std/list") as list
+
+test "policy allows approved core transition" {
+  let p = policy.default_enterprise_policy()
+  let s = state.new_workflow("wf_test", "test", "owner")
+  let a = runtime.actor("u1", ["operator"])
+  let r = policy.evaluate(p, s, a, { tool: "none" })
+  r.ok
+}
+
+test "policy blocks unapproved tool" {
+  let p = policy.default_enterprise_policy()
+  let s = state.new_workflow("wf_test", "test", "owner")
+  let a = runtime.actor("u1", ["operator"])
+  let r = policy.evaluate(p, s, a, { tool: "external_email" })
+  !r.ok && list.len(r.violations) == 1
+}
+
+test "policy blocks pii to public model" {
+  let p = policy.default_enterprise_policy()
+  let s = state.new_workflow("wf_test", "test", "owner")
+  let a = runtime.actor("u1", ["operator"])
+  let r = policy.evaluate(p, s, a, { tool: "none", data_classification: "pii", destination: "public_model" })
+  !r.ok
+}
+
+test "spend approval passes after manager approval" {
+  let p = policy.default_enterprise_policy()
+  let s0 = state.new_workflow("wf_test", "test", "owner")
+  let s = state.add_approval(s0, { kind: "manager_spend", status: "approved", by: "m1" })
+  let a = runtime.actor("u1", ["operator"])
+  let r = policy.evaluate(p, s, a, { tool: "none", amount: 9000 })
+  r.ok
+}
+
+test "agent without operator role may write_artifact" {
+  let p = policy.default_enterprise_policy()
+  let s = state.new_workflow("wf_test", "test", "owner")
+  let a = runtime.actor("agent:research", ["agent"])
+  let r = policy.evaluate(p, s, a, { tool: "write_artifact" })
+  r.ok
+}
+
+test "role rule scoped to none does not fire on write_artifact" {
+  let p = policy.default_enterprise_policy()
+  let s = state.new_workflow("wf_test", "test", "owner")
+  let a = runtime.actor("agent:1", [])
+  let r = policy.evaluate(p, s, a, { tool: "write_artifact" })
+  let role_results = list.filter(r.results, fn(x) { x.rule_id == "role.state.edit" })
+  list.len(role_results) == 1 && list.head(role_results).ok
+}
+
+test "spend below threshold passes without approval" {
+  let p = policy.default_enterprise_policy()
+  let s = state.new_workflow("wf_test", "test", "owner")
+  let a = runtime.actor("u1", ["operator"])
+  let r = policy.evaluate(p, s, a, { tool: "none", amount: 100 })
+  r.ok
+}
+
+test "spend above threshold blocked without approval" {
+  let p = policy.default_enterprise_policy()
+  let s = state.new_workflow("wf_test", "test", "owner")
+  let a = runtime.actor("u1", ["operator"])
+  let r = policy.evaluate(p, s, a, { tool: "none", amount: 9000 })
+  !r.ok
+}
+
+test "customer_secret blocked to public model" {
+  let p = policy.default_enterprise_policy()
+  let s = state.new_workflow("wf_test", "test", "owner")
+  let a = runtime.actor("u1", ["operator"])
+  let r = policy.evaluate(p, s, a, { tool: "none", data_classification: "customer_secret", destination: "public_model" })
+  !r.ok
+}

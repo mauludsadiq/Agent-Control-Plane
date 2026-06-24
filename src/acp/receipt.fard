@@ -1,0 +1,83 @@
+import("std/json") as json
+import("std/hash") as hash
+import("std/rec") as rec
+import("std/list") as list
+import("std/str") as str
+
+fn canonical(v) {
+  json.canonicalize(v)
+}
+
+fn digest(v) {
+  hash.sha256_text(canonical(v))
+}
+
+fn event_digest(kind, payload) {
+  digest({ kind: kind, payload: payload })
+}
+
+fn make_state_receipt(workflow_id, seq, kind, actor, state_before, input, policy_version, tool_version, artifact_digests, state_after) {
+  let body = {
+    receipt_type: "acp.state_transition.v1",
+    workflow_id: workflow_id,
+    seq: seq,
+    kind: kind,
+    actor: actor,
+    state_before_hash: digest(state_before),
+    input_hash: digest(input),
+    policy_version: policy_version,
+    policy_digest: digest(policy_version),
+    tool_version: tool_version,
+    tool_digest: digest(tool_version),
+    artifact_digests: artifact_digests,
+    state_after_hash: digest(state_after)
+  } in
+  { ...body, digest: digest(body) }
+}
+
+fn verify_state_receipt(receipt, state_before, input, state_after) {
+  let expected_before = digest(state_before) in
+  let expected_input = digest(input) in
+  let expected_after = digest(state_after) in
+  let body_check = digest({
+    receipt_type: receipt.receipt_type,
+    workflow_id: receipt.workflow_id,
+    seq: receipt.seq,
+    kind: receipt.kind,
+    actor: receipt.actor,
+    state_before_hash: receipt.state_before_hash,
+    input_hash: receipt.input_hash,
+    policy_version: receipt.policy_version,
+    policy_digest: receipt.policy_digest,
+    tool_version: receipt.tool_version,
+    tool_digest: receipt.tool_digest,
+    artifact_digests: receipt.artifact_digests,
+    state_after_hash: receipt.state_after_hash
+  }) in
+  receipt.state_before_hash == expected_before &&
+  receipt.input_hash == expected_input &&
+  receipt.state_after_hash == expected_after &&
+  receipt.digest == body_check
+}
+
+// append_chain links a new receipt onto a running chain hash.
+// The genesis link uses digest("genesis") as prev.
+fn append_chain(prev_chain_hash, receipt) {
+  digest({ prev: prev_chain_hash, next: receipt.digest })
+}
+
+// chain_root builds a linked hash chain over receipts in order.
+// Each link commits to all prior history — insertion or reordering
+// of any receipt produces a different root.
+fn chain_root(receipts) {
+  let genesis = digest("genesis") in
+  let result = list.fold(receipts, genesis, fn(acc, r) { append_chain(acc, r) }) in
+  result
+}
+
+// verify_chain confirms that replaying receipts produces the expected root.
+fn verify_chain(receipts, expected_root) {
+  chain_root(receipts) == expected_root
+}
+
+export { canonical, digest, event_digest, make_state_receipt, verify_state_receipt, chain_root, append_chain, verify_chain }

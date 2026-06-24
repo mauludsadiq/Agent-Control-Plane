@@ -1,0 +1,58 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Agent Control Plane API",
+    "version": "1.0.0",
+    "description": "Governed AI workflow control plane: state edits, artifacts, policy rails, receipts, timeline, replay."
+  },
+  "paths": {
+    "/workflows": {
+      "post": {
+        "summary": "Create workflow",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateWorkflow" } } } },
+        "responses": { "200": { "description": "Workflow state", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WorkflowState" } } } } }
+      }
+    },
+    "/workflows/{id}/state/edit": {
+      "post": {
+        "summary": "Commit human state edit",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StateEdit" } } } },
+        "responses": { "200": { "description": "Transition result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TransitionResult" } } } } }
+      }
+    },
+    "/workflows/{id}/artifacts": {
+      "post": {
+        "summary": "Commit artifact",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Artifact" } } } },
+        "responses": { "200": { "description": "Artifact commit result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TransitionResult" } } } } }
+      }
+    },
+    "/workflows/{id}/dashboard": {
+      "get": {
+        "summary": "Dashboard projection",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Dashboard", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Dashboard" } } } } }
+      }
+    },
+    "/workflows/{id}/replay": {
+      "post": {
+        "summary": "Replay workflow events",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Replay result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ReplayResult" } } } } }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "CreateWorkflow": { "type": "object", "required": ["workflow_id", "goal", "owner"], "properties": { "workflow_id": { "type": "string" }, "goal": { "type": "string" }, "owner": { "type": "string" } } },
+      "WorkflowState": { "type": "object", "additionalProperties": true },
+      "StateEdit": { "type": "object", "required": ["actor", "patches"], "properties": { "actor": { "type": "object" }, "patches": { "type": "array", "items": { "type": "object" } } } },
+      "Artifact": { "type": "object", "required": ["kind", "name", "media_type", "content", "producer", "input_state_hash", "tool_trace", "confidence"], "properties": { "kind": { "type": "string" }, "name": { "type": "string" }, "media_type": { "type": "string" }, "content": {}, "producer": { "type": "string" }, "input_state_hash": { "type": "string" }, "tool_trace": { "type": "array", "items": { "type": "object" } }, "confidence": { "type": "integer" } } },
+      "TransitionResult": { "type": "object", "required": ["ok", "state", "receipt"], "properties": { "ok": { "type": "boolean" }, "state": { "type": "object" }, "receipt": { "type": "object" }, "policy": { "type": "object" } } },
+      "Dashboard": { "type": "object", "additionalProperties": true },
+      "ReplayResult": { "type": "object", "required": ["ok", "state", "receipts", "chain_root"], "properties": { "ok": { "type": "boolean" }, "state": { "type": "object" }, "receipts": { "type": "array", "items": { "type": "object" } }, "chain_root": { "type": "string" } } }
+    }
+  }
+}
