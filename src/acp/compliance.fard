@@ -1,0 +1,232 @@
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+import("receipt") as receipt
+import("anchor") as anchor
+import("autonomy") as autonomy
+import("delta") as delta
+import("policy") as policy
+
+// Compliance report generator.
+//
+// Assembles findings from all ACP subsystems into one auditable document.
+// The report is deterministic — given the same inputs it produces the same
+// evidence_digest. Any third party can recompute and verify.
+//
+// Sections:
+//   identity          workflow metadata and report generation context
+//   policy_coverage   which rules fired, violation summary, rule gap analysis
+//   chain_integrity   receipt chain verification, tamper evidence
+//   anchor_status     external anchoring coverage and gaps
+//   storage           delta efficiency vs full-blob baseline
+//   autonomy_roster   per-actor autonomy levels and evidence
+//   violations        full violation history with severity breakdown
+//   artifact_provenance  artifact shelf with producer, confidence, tool trace count
+//   verdict           overall compliance signal with reasons
+
+// ─── SECTION BUILDERS ─────────────────────────────────────────────────────────
+
+fn section_identity(workflow_state, policy_rec) {
+  {
+    workflow_id: workflow_state.workflow_id,
+    goal: workflow_state.goal,
+    owner: workflow_state.owner,
+    stage: workflow_state.stage,
+    seq: workflow_state.seq,
+    schema: workflow_state.schema,
+    policy_version: policy_rec.version,
+    state_hash: receipt.digest(workflow_state)
+  }
+}
+
+fn section_policy_coverage(workflow_state, receipts, policy_rec) {
+  let rule_ids = list.map(policy_rec.rules, fn(r) { r.id }) in
+  let rule_count = list.len(policy_rec.rules) in
+  let violations = workflow_state.violations in
+  let violation_count = list.len(violations) in
+  let critical = list.filter(violations, fn(v) { rec.has(v, "severity") && v.severity == "critical" }) in
+  let high = list.filter(violations, fn(v) { rec.has(v, "severity") && v.severity == "high" }) in
+  let medium = list.filter(violations, fn(v) { rec.has(v, "severity") && v.severity == "medium" }) in
+  let violation_rule_ids = list.map(violations, fn(v) { if rec.has(v, "rule_id") then v.rule_id else "unknown" }) in
+  let fired_rules = list.filter(rule_ids, fn(id) { list.any(violation_rule_ids, fn(vid) { vid == id }) }) in
+  {
+    rule_count: rule_count,
+    rule_ids: rule_ids,
+    violation_count: violation_count,
+    critical_count: list.len(critical),
+    high_count: list.len(high),
+    medium_count: list.len(medium),
+    fired_rule_ids: fired_rules,
+    clean: violation_count == 0
+  }
+}
+
+fn section_chain_integrity(receipts) {
+  let count = list.len(receipts) in
+  let root = receipt.chain_root(receipts) in
+  let verified = receipt.verify_chain(receipts, root) in
+  let seqs = list.map(receipts, fn(r) { r.seq }) in
+  let kinds = list.map(receipts, fn(r) { r.kind }) in
+  let violation_receipts = list.filter(receipts, fn(r) { r.kind == "policy_violation" }) in
+  {
+    receipt_count: count,
+    chain_root: root,
+    chain_verified: verified,
+    violation_receipt_count: list.len(violation_receipts),
+    seq_range: { from: if count == 0 then 0 else list.head(seqs), to: if count == 0 then 0 else list.last(seqs) },
+    transition_kinds: kinds,
+    tamper_evident: verified
+  }
+}
+
+fn section_anchor_status(anchor_log, max_seq) {
+  let s = anchor.summary(anchor_log, max_seq) in
+  {
+    proof_count: s.proof_count,
+    fully_anchored: s.fully_anchored,
+    gaps: s.gaps,
+    gap_count: list.len(s.gaps),
+    coverage: s.coverage
+  }
+}
+
+fn section_storage(deltas) {
+  let report = delta.storage_report(deltas) in
+  let summary = delta.summarize(deltas) in
+  {
+    delta_count: report.delta_count,
+    total_patch_ops: report.total_patch_ops,
+    total_artifact_refs: report.total_artifact_refs,
+    baseline_plus_deltas: report.baseline_plus_deltas,
+    full_blob_equivalent: report.full_blob_equivalent,
+    summary: summary
+  }
+}
+
+fn section_autonomy_roster(autonomy_records) {
+  let summaries = list.map(autonomy_records, fn(r) { autonomy.summary(r) }) in
+  let restricted = list.filter(summaries, fn(s) { s.level == autonomy.LEVEL_RESTRICTED }) in
+  let autonomous = list.filter(summaries, fn(s) { s.level == autonomy.LEVEL_AUTONOMOUS }) in
+  {
+    actor_count: list.len(autonomy_records),
+    restricted_count: list.len(restricted),
+    autonomous_count: list.len(autonomous),
+    actors: summaries
+  }
+}
+
+fn section_violations(workflow_state) {
+  let violations = workflow_state.violations in
+  let by_severity = {
+    critical: list.filter(violations, fn(v) { rec.has(v, "severity") && v.severity == "critical" }),
+    high: list.filter(violations, fn(v) { rec.has(v, "severity") && v.severity == "high" }),
+    medium: list.filter(violations, fn(v) { rec.has(v, "severity") && v.severity == "medium" }),
+    low: list.filter(violations, fn(v) { rec.has(v, "severity") && v.severity == "low" })
+  } in
+  {
+    total: list.len(violations),
+    by_severity: by_severity,
+    codes: list.map(violations, fn(v) { if rec.has(v, "code") then v.code else "UNKNOWN" }),
+    all: violations
+  }
+}
+
+fn section_artifact_provenance(artifacts) {
+  let cards = list.map(artifacts, fn(a) {
+    {
+      name: if rec.has(a, "name") then a.name else "unknown",
+      kind: if rec.has(a, "kind") then a.kind else "unknown",
+      producer: if rec.has(a, "producer") then a.producer else "unknown",
+      confidence: if rec.has(a, "confidence") then a.confidence else 0,
+      digest: if rec.has(a, "digest") then a.digest else "unknown",
+      tool_count: if rec.has(a, "tool_trace") then list.len(a.tool_trace) else 0,
+      input_state_hash: if rec.has(a, "input_state_hash") then a.input_state_hash else "unknown"
+    }
+  }) in
+  let avg_confidence = if list.len(artifacts) == 0 then 0
+    else list.fold(cards, 0, fn(acc, c) { acc + c.confidence }) / list.len(cards) in
+  let low_confidence = list.filter(cards, fn(c) { c.confidence < 70 }) in
+  {
+    artifact_count: list.len(artifacts),
+    avg_confidence: avg_confidence,
+    low_confidence_count: list.len(low_confidence),
+    artifacts: cards
+  }
+}
+
+// ─── VERDICT ──────────────────────────────────────────────────────────────────
+
+fn derive_verdict(policy_sec, chain_sec, anchor_sec, violation_sec, artifact_sec) {
+  let reasons = [] in
+  let reasons = if !chain_sec.chain_verified
+    then list.append(reasons, "receipt chain verification failed") else reasons in
+  let reasons = if violation_sec.by_severity.critical != []
+    then list.append(reasons, str.concat([str.from(list.len(violation_sec.by_severity.critical)), " critical policy violation(s)"])) else reasons in
+  let reasons = if violation_sec.by_severity.high != []
+    then list.append(reasons, str.concat([str.from(list.len(violation_sec.by_severity.high)), " high severity violation(s)"])) else reasons in
+  let warnings = [] in
+  let warnings = if !anchor_sec.fully_anchored
+    then list.append(warnings, str.concat([str.from(anchor_sec.gap_count), " unanchored seq gap(s)"])) else warnings in
+  let warnings = if artifact_sec.low_confidence_count > 0
+    then list.append(warnings, str.concat([str.from(artifact_sec.low_confidence_count), " low-confidence artifact(s)"])) else warnings in
+  let warnings = if violation_sec.by_severity.medium != []
+    then list.append(warnings, str.concat([str.from(list.len(violation_sec.by_severity.medium)), " medium severity violation(s)"])) else warnings in
+  let verdict = if list.len(reasons) > 0 then "non_compliant"
+    else if list.len(warnings) > 0 then "warnings"
+    else "compliant" in
+  { verdict: verdict, reasons: reasons, warnings: warnings }
+}
+
+// ─── MAIN ENTRY POINT ─────────────────────────────────────────────────────────
+
+// generate assembles a full compliance report from all subsystem outputs.
+// autonomy_records: list of autonomy.score() results, one per actor
+// anchor_log: anchor.new_log() with proofs appended
+// deltas: list of delta.from_transition() records
+fn generate(workflow_state, receipts, artifacts, deltas, anchor_log, autonomy_records, policy_rec) {
+  let identity = section_identity(workflow_state, policy_rec) in
+  let policy_sec = section_policy_coverage(workflow_state, receipts, policy_rec) in
+  let chain_sec = section_chain_integrity(receipts) in
+  let anchor_sec = section_anchor_status(anchor_log, workflow_state.seq) in
+  let storage_sec = section_storage(deltas) in
+  let autonomy_sec = section_autonomy_roster(autonomy_records) in
+  let violation_sec = section_violations(workflow_state) in
+  let artifact_sec = section_artifact_provenance(artifacts) in
+  let verdict_rec = derive_verdict(policy_sec, chain_sec, anchor_sec, violation_sec, artifact_sec) in
+  let report = {
+    report_type: "acp.compliance_report.v1",
+    verdict: verdict_rec.verdict,
+    reasons: verdict_rec.reasons,
+    warnings: verdict_rec.warnings,
+    identity: identity,
+    policy_coverage: policy_sec,
+    chain_integrity: chain_sec,
+    anchor_status: anchor_sec,
+    storage: storage_sec,
+    autonomy_roster: autonomy_sec,
+    violations: violation_sec,
+    artifact_provenance: artifact_sec
+  } in
+  { ...report, evidence_digest: receipt.digest(report) }
+}
+
+// verify confirms a report's evidence_digest matches its content.
+fn verify(report) {
+  let body = {
+    report_type: report.report_type,
+    verdict: report.verdict,
+    reasons: report.reasons,
+    warnings: report.warnings,
+    identity: report.identity,
+    policy_coverage: report.policy_coverage,
+    chain_integrity: report.chain_integrity,
+    anchor_status: report.anchor_status,
+    storage: report.storage,
+    autonomy_roster: report.autonomy_roster,
+    violations: report.violations,
+    artifact_provenance: report.artifact_provenance
+  } in
+  receipt.digest(body) == report.evidence_digest
+}
+
+export { generate, verify, derive_verdict, section_identity, section_policy_coverage, section_chain_integrity, section_anchor_status, section_storage, section_autonomy_roster, section_violations, section_artifact_provenance }

@@ -1,0 +1,261 @@
+import("../src/acp/compliance") as compliance
+import("../src/acp/state") as state
+import("../src/acp/policy") as policy
+import("../src/acp/runtime") as runtime
+import("../src/acp/receipt") as receipt
+import("../src/acp/artifact") as artifact
+import("../src/acp/anchor") as anchor
+import("../src/acp/autonomy") as autonomy
+import("../src/acp/delta") as delta
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+
+// ─── FIXTURES ─────────────────────────────────────────────────────────────────
+
+fn clean_workflow() {
+  let p = policy.default_enterprise_policy() in
+  let s0 = state.new_workflow("wf_compliance", "compliance test", "ops") in
+  let a = runtime.actor("operator:1", ["operator"]) in
+  let r1 = runtime.human_state_edit(a, s0, p, [{ path: "stage", value: "research" }]) in
+  let r2 = runtime.human_state_edit(a, r1.state, p, [{ path: "stage", value: "review" }]) in
+  { state: r2.state, receipts: [r1.receipt, r2.receipt], actor: a, policy: p, s0: s0 }
+}
+
+fn make_artifact_rec(producer, confidence) {
+  artifact.make("summary", str.concat([producer, "_output.md"]), "text/markdown",
+    "findings here", producer, "sha256:abc", [{ tool: "search", ok: true }], confidence)
+}
+
+fn make_anchor_log_with_proof(receipts, workflow_id) {
+  let root = receipt.chain_root(receipts) in
+  let payload = anchor.make_payload(workflow_id, 1, list.len(receipts), root, "ACP-POLICY-1.0.0") in
+  let proof = anchor.make_proof(payload, { kind: "ethereum", tx_hash: "0xabc", block: 1, network: "mainnet" }, "anchor-svc") in
+  anchor.append_proof(anchor.new_log(), proof)
+}
+
+fn make_autonomy_record(actor_id, receipt_count) {
+  let receipts = list.build(receipt_count, fn(i) {
+    { receipt_type: "acp.state_transition.v1", workflow_id: "wf_compliance",
+      seq: i + 1, kind: "artifact_committed", actor: actor_id,
+      state_before_hash: receipt.digest({ seq: i }), input_hash: receipt.digest({ i: i }),
+      policy_version: "ACP-POLICY-1.0.0", policy_digest: receipt.digest("pol"),
+      tool_version: "human", tool_digest: receipt.digest("human"),
+      artifact_digests: [], state_after_hash: receipt.digest({ seq: i + 1 }),
+      digest: receipt.digest({ seq: i + 1, actor: actor_id }) }
+  }) in
+  let artifacts = list.build(receipt_count, fn(i) {
+    { name: str.concat(["a", str.from(i)]), producer: actor_id, confidence: 85,
+      digest: receipt.digest({ i: i, actor: actor_id }) }
+  }) in
+  autonomy.score(actor_id, receipts, artifacts, 0)
+}
+
+fn make_deltas(s0) {
+  let p = policy.default_enterprise_policy() in
+  let a = runtime.actor("operator:1", ["operator"]) in
+  let patches = [{ path: "stage", value: "research" }] in
+  let r1 = runtime.human_state_edit(a, s0, p, patches) in
+  [delta.from_transition(r1, patches, "human_state_edit", a.id)]
+}
+
+fn full_report() {
+  let wf = clean_workflow() in
+  let arts = [make_artifact_rec("agent:1", 90)] in
+  let log = make_anchor_log_with_proof(wf.receipts, "wf_compliance") in
+  let auto_rec = make_autonomy_record("operator:1", 15) in
+  let deltas = make_deltas(wf.s0) in
+  compliance.generate(wf.state, wf.receipts, arts, deltas, log, [auto_rec], wf.policy)
+}
+
+// ─── IDENTITY ─────────────────────────────────────────────────────────────────
+
+test "compliance report identity section has correct fields" {
+  let wf = clean_workflow() in
+  let sec = compliance.section_identity(wf.state, wf.policy) in
+  sec.workflow_id == "wf_compliance" &&
+  sec.stage == "review" &&
+  sec.seq == 2 &&
+  str.starts_with(sec.state_hash, "sha256:")
+}
+
+// ─── POLICY COVERAGE ──────────────────────────────────────────────────────────
+
+test "policy coverage section reports clean when no violations" {
+  let wf = clean_workflow() in
+  let sec = compliance.section_policy_coverage(wf.state, wf.receipts, wf.policy) in
+  sec.clean && sec.violation_count == 0 && sec.rule_count == 4
+}
+
+test "policy coverage section reports violations correctly" {
+  let p = policy.default_enterprise_policy() in
+  let s0 = state.new_workflow("wf_compliance", "test", "ops") in
+  let viewer = runtime.actor("viewer:1", []) in
+  let r1 = runtime.transition("human_state_edit", viewer, { tool: "none", patches: [] }, s0, p, "human") in
+  let sec = compliance.section_policy_coverage(r1.state, [r1.receipt], p) in
+  !sec.clean && sec.violation_count == 1 && sec.high_count == 1
+}
+
+// ─── CHAIN INTEGRITY ──────────────────────────────────────────────────────────
+
+test "chain integrity section verifies clean receipt chain" {
+  let wf = clean_workflow() in
+  let sec = compliance.section_chain_integrity(wf.receipts) in
+  sec.chain_verified && sec.tamper_evident && sec.receipt_count == 2
+}
+
+test "chain integrity section counts violation receipts" {
+  let p = policy.default_enterprise_policy() in
+  let s0 = state.new_workflow("wf_compliance", "test", "ops") in
+  let viewer = runtime.actor("viewer:1", []) in
+  let r1 = runtime.transition("human_state_edit", viewer, { tool: "none", patches: [] }, s0, p, "human") in
+  let sec = compliance.section_chain_integrity([r1.receipt]) in
+  sec.violation_receipt_count == 1
+}
+
+// ─── ANCHOR STATUS ────────────────────────────────────────────────────────────
+
+test "anchor status section reports fully anchored" {
+  let wf = clean_workflow() in
+  let log = make_anchor_log_with_proof(wf.receipts, "wf_compliance") in
+  let sec = compliance.section_anchor_status(log, 2) in
+  sec.fully_anchored && sec.proof_count == 1 && sec.gap_count == 0
+}
+
+test "anchor status section reports gaps when unanchored" {
+  let log = anchor.new_log() in
+  let sec = compliance.section_anchor_status(log, 5) in
+  !sec.fully_anchored && sec.gap_count == 1
+}
+
+// ─── STORAGE ──────────────────────────────────────────────────────────────────
+
+test "storage section reports delta count" {
+  let wf = clean_workflow() in
+  let deltas = make_deltas(wf.s0) in
+  let sec = compliance.section_storage(deltas) in
+  sec.delta_count == 1 && sec.total_patch_ops == 1
+}
+
+// ─── AUTONOMY ROSTER ──────────────────────────────────────────────────────────
+
+test "autonomy roster section lists all actors" {
+  let r1 = make_autonomy_record("agent:research", 15) in
+  let r2 = make_autonomy_record("agent:finance", 3) in
+  let sec = compliance.section_autonomy_roster([r1, r2]) in
+  sec.actor_count == 2
+}
+
+test "autonomy roster identifies restricted actors" {
+  let r1 = make_autonomy_record("agent:new", 0) in
+  let sec = compliance.section_autonomy_roster([r1]) in
+  sec.restricted_count == 1
+}
+
+// ─── VIOLATIONS ───────────────────────────────────────────────────────────────
+
+test "violations section breaks down by severity" {
+  let p = policy.default_enterprise_policy() in
+  let s0 = state.new_workflow("wf_compliance", "test", "ops") in
+  let viewer = runtime.actor("viewer:1", []) in
+  let r1 = runtime.transition("human_state_edit", viewer, { tool: "none", patches: [] }, s0, p, "human") in
+  let sec = compliance.section_violations(r1.state) in
+  sec.total == 1 && list.len(sec.by_severity.high) == 1
+}
+
+test "violations section is empty for clean workflow" {
+  let wf = clean_workflow() in
+  let sec = compliance.section_violations(wf.state) in
+  sec.total == 0
+}
+
+// ─── ARTIFACT PROVENANCE ──────────────────────────────────────────────────────
+
+test "artifact provenance section computes avg confidence" {
+  let a1 = make_artifact_rec("agent:1", 90) in
+  let a2 = make_artifact_rec("agent:2", 80) in
+  let sec = compliance.section_artifact_provenance([a1, a2]) in
+  sec.artifact_count == 2 && sec.avg_confidence == 85
+}
+
+test "artifact provenance section flags low confidence artifacts" {
+  let a1 = make_artifact_rec("agent:1", 90) in
+  let a2 = make_artifact_rec("agent:2", 60) in
+  let sec = compliance.section_artifact_provenance([a1, a2]) in
+  sec.low_confidence_count == 1
+}
+
+// ─── VERDICT ──────────────────────────────────────────────────────────────────
+
+test "verdict is compliant for clean workflow" {
+  let wf = clean_workflow() in
+  let p_sec = compliance.section_policy_coverage(wf.state, wf.receipts, wf.policy) in
+  let c_sec = compliance.section_chain_integrity(wf.receipts) in
+  let a_sec = compliance.section_anchor_status(make_anchor_log_with_proof(wf.receipts, "wf_compliance"), 2) in
+  let v_sec = compliance.section_violations(wf.state) in
+  let art_sec = compliance.section_artifact_provenance([]) in
+  let verdict = compliance.derive_verdict(p_sec, c_sec, a_sec, v_sec, art_sec) in
+  verdict.verdict == "compliant" && list.len(verdict.reasons) == 0 && list.len(verdict.warnings) == 0
+}
+
+test "verdict is warnings when anchor gaps exist" {
+  let wf = clean_workflow() in
+  let p_sec = compliance.section_policy_coverage(wf.state, wf.receipts, wf.policy) in
+  let c_sec = compliance.section_chain_integrity(wf.receipts) in
+  let a_sec = compliance.section_anchor_status(anchor.new_log(), 2) in
+  let v_sec = compliance.section_violations(wf.state) in
+  let art_sec = compliance.section_artifact_provenance([]) in
+  let verdict = compliance.derive_verdict(p_sec, c_sec, a_sec, v_sec, art_sec) in
+  verdict.verdict == "warnings" && list.len(verdict.warnings) > 0
+}
+
+test "verdict is non_compliant when critical violations exist" {
+  let p = policy.default_enterprise_policy() in
+  let s0 = state.new_workflow("wf_compliance", "test", "ops") in
+  let a = runtime.actor("operator:1", ["operator"]) in
+  let r1 = runtime.transition("human_state_edit", a,
+    { tool: "none", patches: [], data_classification: "pii", destination: "public_model" }, s0, p, "human") in
+  let p_sec = compliance.section_policy_coverage(r1.state, [r1.receipt], p) in
+  let c_sec = compliance.section_chain_integrity([r1.receipt]) in
+  let a_sec = compliance.section_anchor_status(anchor.new_log(), 1) in
+  let v_sec = compliance.section_violations(r1.state) in
+  let art_sec = compliance.section_artifact_provenance([]) in
+  let verdict = compliance.derive_verdict(p_sec, c_sec, a_sec, v_sec, art_sec) in
+  verdict.verdict == "non_compliant"
+}
+
+// ─── FULL REPORT ──────────────────────────────────────────────────────────────
+
+test "generate produces report with evidence digest" {
+  let report = full_report() in
+  report.report_type == "acp.compliance_report.v1" &&
+  str.starts_with(report.evidence_digest, "sha256:") &&
+  rec.has(report, "verdict")
+}
+
+test "generate report is verifiable" {
+  let report = full_report() in
+  compliance.verify(report)
+}
+
+test "generate report verdict is compliant for clean workflow with anchoring" {
+  let report = full_report() in
+  report.verdict == "compliant"
+}
+
+test "tampered report fails verification" {
+  let report = full_report() in
+  // Change the verdict field while keeping the original evidence_digest — tamper detected
+  let tampered = { ...report, verdict: "non_compliant" } in
+  !compliance.verify(tampered)
+}
+
+test "report evidence digest changes when content changes" {
+  let wf = clean_workflow() in
+  let log = make_anchor_log_with_proof(wf.receipts, "wf_compliance") in
+  let auto_rec = make_autonomy_record("operator:1", 15) in
+  let deltas = make_deltas(wf.s0) in
+  let report_a = compliance.generate(wf.state, wf.receipts, [], deltas, log, [auto_rec], wf.policy) in
+  let report_b = compliance.generate(wf.state, wf.receipts, [make_artifact_rec("agent:1", 90)], deltas, log, [auto_rec], wf.policy) in
+  report_a.evidence_digest != report_b.evidence_digest
+}
