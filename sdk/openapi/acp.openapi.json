@@ -2,57 +2,712 @@
   "openapi": "3.0.3",
   "info": {
     "title": "Agent Control Plane API",
-    "version": "1.0.0",
-    "description": "Governed AI workflow control plane: state edits, artifacts, policy rails, receipts, timeline, replay."
+    "version": "2.0.0",
+    "description": "Governed AI workflow control plane: typed state transitions, policy rails, cryptographic receipts, artifact provenance, deterministic replay, delta storage, workflow branching, and async policy gates."
   },
   "paths": {
     "/workflows": {
       "post": {
         "summary": "Create workflow",
-        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateWorkflow" } } } },
-        "responses": { "200": { "description": "Workflow state", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WorkflowState" } } } } }
+        "operationId": "createWorkflow",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateWorkflowRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "Workflow created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateWorkflowResponse" } } } },
+          "409": { "description": "Workflow already exists", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } }
+        }
+      }
+    },
+    "/workflows/{id}": {
+      "get": {
+        "summary": "Get workflow state",
+        "operationId": "getWorkflow",
+        "parameters": [{ "$ref": "#/components/parameters/WorkflowId" }],
+        "responses": {
+          "200": { "description": "Workflow state", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WorkflowState" } } } },
+          "404": { "description": "Workflow not found", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } }
+        }
       }
     },
     "/workflows/{id}/state/edit": {
       "post": {
         "summary": "Commit human state edit",
-        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
-        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StateEdit" } } } },
-        "responses": { "200": { "description": "Transition result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TransitionResult" } } } } }
+        "operationId": "editState",
+        "parameters": [{ "$ref": "#/components/parameters/WorkflowId" }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StateEditRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "Transition result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TransitionResult" } } } },
+          "403": { "description": "Policy violation", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TransitionResult" } } } },
+          "404": { "description": "Workflow not found", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } }
+        }
       }
     },
     "/workflows/{id}/artifacts": {
       "post": {
         "summary": "Commit artifact",
-        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
-        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Artifact" } } } },
-        "responses": { "200": { "description": "Artifact commit result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TransitionResult" } } } } }
+        "operationId": "commitArtifact",
+        "parameters": [{ "$ref": "#/components/parameters/WorkflowId" }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CommitArtifactRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "Artifact committed", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TransitionResult" } } } },
+          "403": { "description": "Policy violation", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TransitionResult" } } } },
+          "404": { "description": "Workflow not found", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } }
+        }
       }
     },
     "/workflows/{id}/dashboard": {
       "get": {
         "summary": "Dashboard projection",
-        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
-        "responses": { "200": { "description": "Dashboard", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Dashboard" } } } } }
+        "operationId": "getDashboard",
+        "parameters": [{ "$ref": "#/components/parameters/WorkflowId" }],
+        "responses": {
+          "200": { "description": "Dashboard", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Dashboard" } } } },
+          "404": { "description": "Workflow not found", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } }
+        }
+      }
+    },
+    "/workflows/{id}/receipts": {
+      "get": {
+        "summary": "List receipts for workflow",
+        "operationId": "getReceipts",
+        "parameters": [{ "$ref": "#/components/parameters/WorkflowId" }],
+        "responses": {
+          "200": { "description": "Receipt list", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ReceiptListResponse" } } } },
+          "404": { "description": "Workflow not found", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } }
+        }
       }
     },
     "/workflows/{id}/replay": {
       "post": {
-        "summary": "Replay workflow events",
-        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
-        "responses": { "200": { "description": "Replay result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ReplayResult" } } } } }
+        "summary": "Replay workflow from initial state",
+        "operationId": "replayWorkflow",
+        "parameters": [{ "$ref": "#/components/parameters/WorkflowId" }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ReplayRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "Replay result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ReplayResult" } } } },
+          "404": { "description": "Workflow not found", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } }
+        }
+      }
+    },
+    "/workflows/{id}/replay/compare": {
+      "post": {
+        "summary": "Compare two replay results",
+        "operationId": "compareReplay",
+        "parameters": [{ "$ref": "#/components/parameters/WorkflowId" }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CompareReplayRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "Comparison result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CompareReplayResult" } } } }
+        }
+      }
+    },
+    "/workflows/{id}/fork": {
+      "post": {
+        "summary": "Fork workflow at a branch point for counterfactual replay",
+        "operationId": "forkWorkflow",
+        "parameters": [{ "$ref": "#/components/parameters/WorkflowId" }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ForkRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "Fork result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ForkResult" } } } },
+          "404": { "description": "Workflow not found", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } }
+        }
+      }
+    },
+    "/workflows/{id}/gate/open": {
+      "post": {
+        "summary": "Open an async policy gate on the workflow",
+        "operationId": "openGate",
+        "parameters": [{ "$ref": "#/components/parameters/WorkflowId" }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GateOpenRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "Gate opened", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GateOpenResult" } } } },
+          "404": { "description": "Workflow not found", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } }
+        }
+      }
+    },
+    "/workflows/{id}/gate/resume": {
+      "post": {
+        "summary": "Resume a gated workflow with approval or rejection",
+        "operationId": "resumeGate",
+        "parameters": [{ "$ref": "#/components/parameters/WorkflowId" }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GateResumeRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "Gate resolved", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TransitionResult" } } } },
+          "400": { "description": "Token mismatch, expiry, or policy still blocked", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "404": { "description": "Workflow not found or no gate present", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } }
+        }
+      }
+    },
+    "/workflows/{id}/gate": {
+      "get": {
+        "summary": "Get current gate status",
+        "operationId": "getGate",
+        "parameters": [{ "$ref": "#/components/parameters/WorkflowId" }],
+        "responses": {
+          "200": { "description": "Gate status", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GateStatusResponse" } } } },
+          "404": { "description": "Workflow not found", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } }
+        }
+      }
+    },
+    "/workflows/{id}/delta/verify": {
+      "post": {
+        "summary": "Verify a delta chain against a baseline hash",
+        "operationId": "verifyDeltaChain",
+        "parameters": [{ "$ref": "#/components/parameters/WorkflowId" }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeltaVerifyRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "Verification result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeltaVerifyResult" } } } }
+        }
+      }
+    },
+    "/workflows/{id}/delta/summary": {
+      "get": {
+        "summary": "Get compact delta audit log",
+        "operationId": "getDeltaSummary",
+        "parameters": [{ "$ref": "#/components/parameters/WorkflowId" }],
+        "responses": {
+          "200": { "description": "Delta summary", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeltaSummaryResponse" } } } },
+          "404": { "description": "Workflow not found", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } }
+        }
+      }
+    },
+    "/agent/task": {
+      "post": {
+        "summary": "Submit agent worker output for a task",
+        "operationId": "submitAgentOutput",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AgentWorkerOutput" } } }
+        },
+        "responses": {
+          "200": { "description": "Commit result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TransitionResult" } } } },
+          "403": { "description": "Policy violation", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TransitionResult" } } } }
+        }
       }
     }
   },
   "components": {
+    "parameters": {
+      "WorkflowId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string" },
+        "description": "Workflow ID"
+      }
+    },
     "schemas": {
-      "CreateWorkflow": { "type": "object", "required": ["workflow_id", "goal", "owner"], "properties": { "workflow_id": { "type": "string" }, "goal": { "type": "string" }, "owner": { "type": "string" } } },
-      "WorkflowState": { "type": "object", "additionalProperties": true },
-      "StateEdit": { "type": "object", "required": ["actor", "patches"], "properties": { "actor": { "type": "object" }, "patches": { "type": "array", "items": { "type": "object" } } } },
-      "Artifact": { "type": "object", "required": ["kind", "name", "media_type", "content", "producer", "input_state_hash", "tool_trace", "confidence"], "properties": { "kind": { "type": "string" }, "name": { "type": "string" }, "media_type": { "type": "string" }, "content": {}, "producer": { "type": "string" }, "input_state_hash": { "type": "string" }, "tool_trace": { "type": "array", "items": { "type": "object" } }, "confidence": { "type": "integer" } } },
-      "TransitionResult": { "type": "object", "required": ["ok", "state", "receipt"], "properties": { "ok": { "type": "boolean" }, "state": { "type": "object" }, "receipt": { "type": "object" }, "policy": { "type": "object" } } },
-      "Dashboard": { "type": "object", "additionalProperties": true },
-      "ReplayResult": { "type": "object", "required": ["ok", "state", "receipts", "chain_root"], "properties": { "ok": { "type": "boolean" }, "state": { "type": "object" }, "receipts": { "type": "array", "items": { "type": "object" } }, "chain_root": { "type": "string" } } }
+      "Actor": {
+        "type": "object",
+        "required": ["id", "roles"],
+        "properties": {
+          "id": { "type": "string", "description": "Actor identifier, e.g. manager:ops or agent:research" },
+          "roles": { "type": "array", "items": { "type": "string" }, "description": "Role list, e.g. [operator, manager]" }
+        }
+      },
+      "Patch": {
+        "type": "object",
+        "required": ["path", "value"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Patch path. Valid values: stage, goal, owner, plan, variables, final_decision, approvals, var.<key>"
+          },
+          "value": { "description": "Value to set at path" }
+        }
+      },
+      "Violation": {
+        "type": "object",
+        "required": ["ok", "code", "message", "rule_id", "severity"],
+        "properties": {
+          "ok": { "type": "boolean", "enum": [false] },
+          "code": { "type": "string", "description": "e.g. POLICY_TOOL_DENIED, POLICY_ROLE_REQUIRED, POLICY_APPROVAL_REQUIRED, POLICY_DATA_BOUNDARY" },
+          "message": { "type": "string" },
+          "rule_id": { "type": "string" },
+          "severity": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+          "data": { "type": "object", "additionalProperties": true }
+        }
+      },
+      "PolicyResult": {
+        "type": "object",
+        "required": ["ok", "version", "results", "violations"],
+        "properties": {
+          "ok": { "type": "boolean" },
+          "version": { "type": "string" },
+          "results": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+          "violations": { "type": "array", "items": { "$ref": "#/components/schemas/Violation" } }
+        }
+      },
+      "Receipt": {
+        "type": "object",
+        "required": ["receipt_type", "workflow_id", "seq", "kind", "actor", "state_before_hash", "input_hash", "policy_version", "policy_digest", "tool_version", "tool_digest", "artifact_digests", "state_after_hash", "digest"],
+        "properties": {
+          "receipt_type": { "type": "string", "enum": ["acp.state_transition.v1"] },
+          "workflow_id": { "type": "string" },
+          "seq": { "type": "integer" },
+          "kind": { "type": "string", "description": "e.g. human_state_edit, artifact_committed, policy_violation" },
+          "actor": { "type": "string" },
+          "state_before_hash": { "type": "string", "pattern": "^sha256:" },
+          "input_hash": { "type": "string", "pattern": "^sha256:" },
+          "policy_version": { "type": "string" },
+          "policy_digest": { "type": "string", "pattern": "^sha256:" },
+          "tool_version": { "type": "string" },
+          "tool_digest": { "type": "string", "pattern": "^sha256:" },
+          "artifact_digests": { "type": "array", "items": { "type": "string", "pattern": "^sha256:" } },
+          "state_after_hash": { "type": "string", "pattern": "^sha256:" },
+          "digest": { "type": "string", "pattern": "^sha256:" }
+        }
+      },
+      "WorkflowState": {
+        "type": "object",
+        "required": ["schema", "workflow_id", "goal", "owner", "stage", "seq", "plan", "artifacts", "approvals", "violations", "timeline", "variables", "final_decision"],
+        "properties": {
+          "schema": { "type": "string", "enum": ["acp.workflow_state.v1"] },
+          "workflow_id": { "type": "string" },
+          "goal": { "type": "string" },
+          "owner": { "type": "string" },
+          "stage": { "type": "string" },
+          "seq": { "type": "integer", "minimum": 0 },
+          "plan": {
+            "type": "object",
+            "required": ["nodes", "edges"],
+            "properties": {
+              "nodes": { "type": "array", "items": { "$ref": "#/components/schemas/PlanNode" } },
+              "edges": { "type": "array", "items": { "$ref": "#/components/schemas/PlanEdge" } }
+            }
+          },
+          "artifacts": { "type": "array", "items": { "type": "string", "pattern": "^sha256:" } },
+          "approvals": { "type": "array", "items": { "$ref": "#/components/schemas/Approval" } },
+          "violations": { "type": "array", "items": { "$ref": "#/components/schemas/Violation" } },
+          "timeline": { "type": "array", "items": { "$ref": "#/components/schemas/TimelineEvent" } },
+          "variables": { "type": "object", "additionalProperties": true },
+          "final_decision": { "nullable": true, "type": "object", "additionalProperties": true }
+        }
+      },
+      "PlanNode": {
+        "type": "object",
+        "required": ["id", "title", "agent", "status", "risk", "output_schema"],
+        "properties": {
+          "id": { "type": "string" },
+          "title": { "type": "string" },
+          "agent": { "type": "string" },
+          "status": { "type": "string", "enum": ["pending", "in_progress", "done", "blocked"] },
+          "risk": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+          "output_schema": { "type": "string" }
+        }
+      },
+      "PlanEdge": {
+        "type": "object",
+        "required": ["from", "to", "reason"],
+        "properties": {
+          "from": { "type": "string" },
+          "to": { "type": "string" },
+          "reason": { "type": "string" }
+        }
+      },
+      "Approval": {
+        "type": "object",
+        "required": ["kind", "status", "by"],
+        "properties": {
+          "kind": { "type": "string", "description": "e.g. manager_spend" },
+          "status": { "type": "string", "enum": ["approved", "rejected", "pending"] },
+          "by": { "type": "string" },
+          "gate_digest": { "type": "string", "pattern": "^sha256:" }
+        }
+      },
+      "TimelineEvent": {
+        "type": "object",
+        "required": ["seq", "kind", "actor", "summary", "digest"],
+        "properties": {
+          "seq": { "type": "integer" },
+          "kind": { "type": "string", "enum": ["handoff", "tool_call", "human_state_edit", "policy_violation", "state_transition"] },
+          "actor": { "type": "string" },
+          "summary": { "type": "string" },
+          "digest": { "type": "string", "pattern": "^sha256:" }
+        }
+      },
+      "ArtifactCard": {
+        "type": "object",
+        "required": ["name", "kind", "producer", "confidence", "digest", "tool_count"],
+        "properties": {
+          "name": { "type": "string" },
+          "kind": { "type": "string" },
+          "producer": { "type": "string" },
+          "confidence": { "type": "integer", "minimum": 0, "maximum": 100 },
+          "digest": { "type": "string", "pattern": "^sha256:" },
+          "tool_count": { "type": "integer", "minimum": 0 }
+        }
+      },
+      "Artifact": {
+        "type": "object",
+        "required": ["artifact_type", "kind", "name", "media_type", "content", "producer", "input_state_hash", "tool_trace", "confidence", "digest"],
+        "properties": {
+          "artifact_type": { "type": "string", "enum": ["acp.artifact.v1"] },
+          "kind": { "type": "string" },
+          "name": { "type": "string" },
+          "media_type": { "type": "string" },
+          "content": { "description": "Artifact content — any JSON-serializable value" },
+          "producer": { "type": "string" },
+          "input_state_hash": { "type": "string", "pattern": "^sha256:" },
+          "tool_trace": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["tool", "ok"],
+              "properties": {
+                "tool": { "type": "string" },
+                "ok": { "type": "boolean" }
+              }
+            }
+          },
+          "confidence": { "type": "integer", "minimum": 0, "maximum": 100 },
+          "digest": { "type": "string", "pattern": "^sha256:" }
+        }
+      },
+      "Delta": {
+        "type": "object",
+        "required": ["delta_type", "seq", "kind", "actor", "patches", "artifact_digests", "state_before_hash", "state_after_hash", "receipt_digest"],
+        "properties": {
+          "delta_type": { "type": "string", "enum": ["acp.delta.v1"] },
+          "seq": { "type": "integer" },
+          "kind": { "type": "string" },
+          "actor": { "type": "string" },
+          "patches": { "type": "array", "items": { "$ref": "#/components/schemas/Patch" } },
+          "artifact_digests": { "type": "array", "items": { "type": "string", "pattern": "^sha256:" } },
+          "state_before_hash": { "type": "string", "pattern": "^sha256:" },
+          "state_after_hash": { "type": "string", "pattern": "^sha256:" },
+          "receipt_digest": { "type": "string", "pattern": "^sha256:" }
+        }
+      },
+      "Branch": {
+        "type": "object",
+        "required": ["lineage_type", "branch_id", "parent_id", "branch_point_seq", "branch_point_hash", "reason"],
+        "properties": {
+          "lineage_type": { "type": "string", "enum": ["acp.branch.v1"] },
+          "branch_id": { "type": "string" },
+          "parent_id": { "type": "string" },
+          "branch_point_seq": { "type": "integer" },
+          "branch_point_hash": { "type": "string", "pattern": "^sha256:" },
+          "reason": { "type": "string" },
+          "created_at_digest": { "type": "string", "pattern": "^sha256:" }
+        }
+      },
+      "Gate": {
+        "type": "object",
+        "required": ["gate_type", "token", "kind", "input", "actor_id", "deadline_seq", "status", "digest"],
+        "properties": {
+          "gate_type": { "type": "string", "enum": ["acp.gate.v1"] },
+          "token": { "type": "string" },
+          "kind": { "type": "string", "description": "e.g. manager_spend" },
+          "input": { "type": "object", "additionalProperties": true },
+          "actor_id": { "type": "string" },
+          "deadline_seq": { "type": "integer" },
+          "context": { "type": "object", "additionalProperties": true },
+          "status": { "type": "string", "enum": ["pending", "approved", "rejected", "expired"] },
+          "digest": { "type": "string", "pattern": "^sha256:" }
+        }
+      },
+      "AgentWorkerInput": {
+        "type": "object",
+        "required": ["task_id", "workflow_id", "state_hash", "allowed_tools", "policy_context", "artifact_inputs", "expected_output_schema"],
+        "properties": {
+          "task_id": { "type": "string" },
+          "workflow_id": { "type": "string" },
+          "state_hash": { "type": "string", "pattern": "^sha256:" },
+          "allowed_tools": { "type": "array", "items": { "type": "string" } },
+          "policy_context": { "type": "object", "additionalProperties": true },
+          "artifact_inputs": { "type": "array", "items": { "$ref": "#/components/schemas/ArtifactCard" } },
+          "expected_output_schema": { "type": "string" }
+        }
+      },
+      "AgentWorkerOutput": {
+        "type": "object",
+        "required": ["task_id", "workflow_id", "artifact", "claims", "confidence", "tool_trace", "state_patch"],
+        "properties": {
+          "task_id": { "type": "string" },
+          "workflow_id": { "type": "string" },
+          "artifact": { "$ref": "#/components/schemas/Artifact" },
+          "claims": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+          "confidence": { "type": "integer", "minimum": 0, "maximum": 100 },
+          "tool_trace": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["tool", "ok"],
+              "properties": {
+                "tool": { "type": "string" },
+                "ok": { "type": "boolean" }
+              }
+            }
+          },
+          "state_patch": { "type": "array", "items": { "$ref": "#/components/schemas/Patch" } }
+        }
+      },
+      "TransitionResult": {
+        "type": "object",
+        "required": ["ok", "state", "receipt"],
+        "properties": {
+          "ok": { "type": "boolean" },
+          "state": { "$ref": "#/components/schemas/WorkflowState" },
+          "receipt": { "$ref": "#/components/schemas/Receipt" },
+          "policy": { "$ref": "#/components/schemas/PolicyResult" }
+        }
+      },
+      "Dashboard": {
+        "type": "object",
+        "required": ["workflow_id", "goal", "stage", "seq", "plan_graph", "artifact_shelf", "timeline", "policy_violations", "state_hash", "replay_available"],
+        "properties": {
+          "workflow_id": { "type": "string" },
+          "goal": { "type": "string" },
+          "stage": { "type": "string" },
+          "seq": { "type": "integer" },
+          "plan_graph": {
+            "type": "object",
+            "properties": {
+              "nodes": { "type": "array", "items": { "$ref": "#/components/schemas/PlanNode" } },
+              "edges": { "type": "array", "items": { "$ref": "#/components/schemas/PlanEdge" } }
+            }
+          },
+          "artifact_shelf": { "type": "array", "items": { "$ref": "#/components/schemas/ArtifactCard" } },
+          "timeline": { "type": "array", "items": { "$ref": "#/components/schemas/TimelineEvent" } },
+          "policy_violations": { "type": "array", "items": { "$ref": "#/components/schemas/Violation" } },
+          "state_hash": { "type": "string", "pattern": "^sha256:" },
+          "replay_available": { "type": "boolean" }
+        }
+      },
+      "ReplayEvent": {
+        "type": "object",
+        "required": ["kind", "input"],
+        "properties": {
+          "kind": { "type": "string" },
+          "input": { "type": "object", "additionalProperties": true }
+        }
+      },
+      "ReplayRequest": {
+        "type": "object",
+        "required": ["actor", "events", "tool_version"],
+        "properties": {
+          "actor": { "$ref": "#/components/schemas/Actor" },
+          "events": { "type": "array", "items": { "$ref": "#/components/schemas/ReplayEvent" } },
+          "tool_version": { "type": "string" }
+        }
+      },
+      "ReplayResult": {
+        "type": "object",
+        "required": ["ok", "state", "receipts", "chain_root", "chain_verified", "step"],
+        "properties": {
+          "ok": { "type": "boolean" },
+          "state": { "$ref": "#/components/schemas/WorkflowState" },
+          "receipts": { "type": "array", "items": { "$ref": "#/components/schemas/Receipt" } },
+          "chain_root": { "type": "string", "pattern": "^sha256:" },
+          "chain_verified": { "type": "boolean" },
+          "step": { "type": "integer" },
+          "failed_at": { "type": "integer", "description": "Step index of first failure, if ok is false" },
+          "error": { "description": "Policy violations on failure" }
+        }
+      },
+      "CompareReplayRequest": {
+        "type": "object",
+        "required": ["a", "b"],
+        "properties": {
+          "a": { "$ref": "#/components/schemas/ReplayResult" },
+          "b": { "$ref": "#/components/schemas/ReplayResult" }
+        }
+      },
+      "CompareReplayResult": {
+        "type": "object",
+        "required": ["equal", "both_ok", "same_state", "same_chain", "a_ok", "b_ok", "a_hash", "b_hash", "a_chain_root", "b_chain_root"],
+        "properties": {
+          "equal": { "type": "boolean" },
+          "both_ok": { "type": "boolean" },
+          "same_state": { "type": "boolean" },
+          "same_chain": { "type": "boolean" },
+          "a_ok": { "type": "boolean" },
+          "b_ok": { "type": "boolean" },
+          "a_hash": { "type": "string", "pattern": "^sha256:" },
+          "b_hash": { "type": "string", "pattern": "^sha256:" },
+          "a_chain_root": { "type": "string", "pattern": "^sha256:" },
+          "b_chain_root": { "type": "string", "pattern": "^sha256:" }
+        }
+      },
+      "ForkRequest": {
+        "type": "object",
+        "required": ["new_workflow_id", "branch_point_seq", "reason"],
+        "properties": {
+          "new_workflow_id": { "type": "string" },
+          "branch_point_seq": { "type": "integer" },
+          "reason": { "type": "string" }
+        }
+      },
+      "ForkResult": {
+        "type": "object",
+        "required": ["ok", "state", "branch"],
+        "properties": {
+          "ok": { "type": "boolean" },
+          "state": { "$ref": "#/components/schemas/WorkflowState" },
+          "branch": { "$ref": "#/components/schemas/Branch" }
+        }
+      },
+      "GateOpenRequest": {
+        "type": "object",
+        "required": ["actor", "input", "gate_kind", "deadline_seq", "context"],
+        "properties": {
+          "actor": { "$ref": "#/components/schemas/Actor" },
+          "input": { "type": "object", "additionalProperties": true, "description": "Original transition input to be committed on approval" },
+          "gate_kind": { "type": "string", "description": "e.g. manager_spend, legal_review, data_boundary_exception" },
+          "deadline_seq": { "type": "integer", "description": "Number of seqs from current before gate expires" },
+          "context": { "type": "object", "additionalProperties": true }
+        }
+      },
+      "GateOpenResult": {
+        "type": "object",
+        "required": ["ok", "state", "receipt", "gate", "token"],
+        "properties": {
+          "ok": { "type": "boolean" },
+          "state": { "$ref": "#/components/schemas/WorkflowState" },
+          "receipt": { "$ref": "#/components/schemas/Receipt" },
+          "gate": { "$ref": "#/components/schemas/Gate" },
+          "token": { "type": "string", "description": "Present this token to resume the gate" }
+        }
+      },
+      "GateResumeRequest": {
+        "type": "object",
+        "required": ["actor", "token", "resolution"],
+        "properties": {
+          "actor": { "$ref": "#/components/schemas/Actor" },
+          "token": { "type": "string" },
+          "resolution": { "type": "string", "enum": ["approved", "rejected"] }
+        }
+      },
+      "GateStatusResponse": {
+        "type": "object",
+        "required": ["has_gate"],
+        "properties": {
+          "has_gate": { "type": "boolean" },
+          "gate": { "$ref": "#/components/schemas/Gate" },
+          "expired": { "type": "boolean" }
+        }
+      },
+      "ReceiptListResponse": {
+        "type": "object",
+        "required": ["receipts", "chain_root", "chain_verified"],
+        "properties": {
+          "receipts": { "type": "array", "items": { "$ref": "#/components/schemas/Receipt" } },
+          "chain_root": { "type": "string", "pattern": "^sha256:" },
+          "chain_verified": { "type": "boolean" }
+        }
+      },
+      "DeltaVerifyRequest": {
+        "type": "object",
+        "required": ["baseline_hash", "deltas"],
+        "properties": {
+          "baseline_hash": { "type": "string", "pattern": "^sha256:" },
+          "deltas": { "type": "array", "items": { "$ref": "#/components/schemas/Delta" } }
+        }
+      },
+      "DeltaVerifyResult": {
+        "type": "object",
+        "required": ["ok"],
+        "properties": {
+          "ok": { "type": "boolean" },
+          "seq": { "type": "integer" },
+          "error": { "type": "string" },
+          "at_seq": { "type": "integer" },
+          "expected": { "type": "string" },
+          "got": { "type": "string" }
+        }
+      },
+      "DeltaSummaryResponse": {
+        "type": "object",
+        "required": ["deltas"],
+        "properties": {
+          "deltas": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["seq", "kind", "actor", "state_before_hash", "state_after_hash", "receipt_digest", "patch_count", "artifact_count"],
+              "properties": {
+                "seq": { "type": "integer" },
+                "kind": { "type": "string" },
+                "actor": { "type": "string" },
+                "state_before_hash": { "type": "string", "pattern": "^sha256:" },
+                "state_after_hash": { "type": "string", "pattern": "^sha256:" },
+                "receipt_digest": { "type": "string", "pattern": "^sha256:" },
+                "patch_count": { "type": "integer" },
+                "artifact_count": { "type": "integer" }
+              }
+            }
+          }
+        }
+      },
+      "CreateWorkflowRequest": {
+        "type": "object",
+        "required": ["workflow_id", "goal", "owner"],
+        "properties": {
+          "workflow_id": { "type": "string" },
+          "goal": { "type": "string" },
+          "owner": { "type": "string" }
+        }
+      },
+      "CreateWorkflowResponse": {
+        "type": "object",
+        "required": ["ok", "state"],
+        "properties": {
+          "ok": { "type": "boolean" },
+          "state": { "$ref": "#/components/schemas/WorkflowState" }
+        }
+      },
+      "StateEditRequest": {
+        "type": "object",
+        "required": ["actor", "patches"],
+        "properties": {
+          "actor": { "$ref": "#/components/schemas/Actor" },
+          "patches": { "type": "array", "items": { "$ref": "#/components/schemas/Patch" } }
+        }
+      },
+      "CommitArtifactRequest": {
+        "type": "object",
+        "required": ["actor", "tool_version", "artifact"],
+        "properties": {
+          "actor": { "$ref": "#/components/schemas/Actor" },
+          "tool_version": { "type": "string" },
+          "artifact": { "$ref": "#/components/schemas/Artifact" }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "required": ["ok", "code"],
+        "properties": {
+          "ok": { "type": "boolean", "enum": [false] },
+          "code": { "type": "string" },
+          "workflow_id": { "type": "string" }
+        }
+      }
     }
   }
 }
