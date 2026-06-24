@@ -1,7 +1,8 @@
 package api
 
 import (
-"encoding/json"
+"database/sql"
+	"encoding/json"
 "net/http"
 "time"
 
@@ -83,6 +84,20 @@ UpdatedAt:   time.Now(),
 
 if err := h.db.CreateWorkflow(wf); err != nil {
 writeErr(w, http.StatusConflict, "workflow already exists or db error: "+err.Error())
+return
+}
+
+// Save seq-0 snapshot so all subsequent bridge calls have a baseline state.
+// Without this GetLatestSnapshot returns nil and every transition fails.
+if err := h.db.Tx(func(tx *sql.Tx) error {
+return h.db.SaveSnapshot(tx, &store.WorkflowSnapshot{
+WorkflowID: req.WorkflowID,
+Seq:        0,
+StateJSON:  result.StateJSON,
+StateHash:  result.StateHash,
+})
+}); err != nil {
+writeErr(w, http.StatusInternalServerError, "save initial snapshot: "+err.Error())
 return
 }
 

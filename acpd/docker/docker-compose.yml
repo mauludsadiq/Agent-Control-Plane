@@ -1,0 +1,30 @@
+version: "3.9"
+
+services:
+  acpd:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8080:8080"
+    volumes:
+      - acp_data:/data
+      # Mount fardrun from host if not in image
+      - type: bind
+        source: ${FARDRUN_BIN:-/usr/local/bin/fardrun}
+        target: /usr/local/bin/fardrun
+        read_only: true
+    environment:
+      - ACP_DB=/data/acp.db
+      - ACP_ADDR=:8080
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  acp_data:
+    driver: local
