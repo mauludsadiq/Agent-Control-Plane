@@ -1,0 +1,197 @@
+import("../src/acp/interop") as interop
+import("../src/acp/plan") as plan
+import("../src/acp/state") as state
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+
+// ─── FIXTURES ─────────────────────────────────────────────────────────────────
+
+fn sample_bpmn_run() {
+  {
+    process_instance: {
+      id: "pi_vendor_001",
+      process_definition_key: "vendor_selection",
+      business_key: "wf_vendor_001",
+      state: "ACTIVE"
+    },
+    activity_instances: [
+      { activity_id: "research_task", activity_name: "Collect Evidence", activity_type: "ServiceTask", assignee: "research_agent", state: "completed" },
+      { activity_id: "legal_task", activity_name: "Review Contract", activity_type: "UserTask", assignee: "legal_team", state: "active" },
+      { activity_id: "approve_gateway", activity_name: "Approve?", activity_type: "ExclusiveGateway", assignee: null, state: "completed" },
+      { activity_id: "end_event", activity_name: "Process Complete", activity_type: "EndEvent", assignee: null, state: "pending" }
+    ],
+    sequence_flows: [
+      { source_ref: "research_task", target_ref: "legal_task", name: "evidence ready" },
+      { source_ref: "legal_task", target_ref: "approve_gateway", name: "review done" }
+    ],
+    history_events: [
+      { type: "activityStarted", activity_id: "research_task", assignee: "research_agent", timestamp_seq: 1 },
+      { type: "activityCompleted", activity_id: "research_task", assignee: "research_agent", timestamp_seq: 2, output: { summary: "Vendor A preferred" } },
+      { type: "variableCreated", activity_id: "research_task", assignee: "research_agent", timestamp_seq: 3, variables: { vendor_count: 2, selected: "vendor_a" } },
+      { type: "activityStarted", activity_id: "legal_task", assignee: "legal_team", timestamp_seq: 4 },
+      { type: "incidentCreated", activity_id: "legal_task", assignee: "legal_team", timestamp_seq: 5, incident: { message: "Contract review blocked pending approval", type: "FAILED_JOB" } }
+    ]
+  }
+}
+
+// ─── NODE INGESTION ───────────────────────────────────────────────────────────
+
+test "bpmn ingest skips gateways and produces plan nodes from tasks only" {
+  let result = interop.bpmn_ingest(sample_bpmn_run()) in
+  // ExclusiveGateway and EndEvent filtered out -> 2 nodes
+  list.len(result.plan.nodes) == 2 &&
+  list.any(result.plan.nodes, fn(n) { n.id == "research_task" }) &&
+  list.any(result.plan.nodes, fn(n) { n.id == "legal_task" })
+}
+
+test "bpmn ingest maps ServiceTask to plan node with service agent" {
+  let result = interop.bpmn_ingest(sample_bpmn_run()) in
+  let node = list.head(list.filter(result.plan.nodes, fn(n) { n.id == "research_task" })) in
+  node.agent == "research_agent" && node.status == "done"
+}
+
+test "bpmn ingest maps UserTask to plan node with assignee as agent" {
+  let result = interop.bpmn_ingest(sample_bpmn_run()) in
+  let node = list.head(list.filter(result.plan.nodes, fn(n) { n.id == "legal_task" })) in
+  node.agent == "legal_team" && node.status == "in_progress"
+}
+
+// ─── EDGE INGESTION ───────────────────────────────────────────────────────────
+
+test "bpmn ingest produces plan edges from sequence flows" {
+  let result = interop.bpmn_ingest(sample_bpmn_run()) in
+  list.len(result.plan.edges) == 2 &&
+  list.any(result.plan.edges, fn(e) { e.from == "research_task" && e.to == "legal_task" })
+}
+
+test "bpmn ingest uses flow name as edge reason" {
+  let result = interop.bpmn_ingest(sample_bpmn_run()) in
+  let edge = list.head(list.filter(result.plan.edges, fn(e) { e.from == "research_task" })) in
+  edge.reason == "evidence ready"
+}
+
+// ─── HISTORY EVENTS ───────────────────────────────────────────────────────────
+
+test "bpmn ingest maps activityStarted to tool_call timeline event" {
+  let result = interop.bpmn_ingest(sample_bpmn_run()) in
+  let started = list.filter(result.timeline_events, fn(e) { e.kind == "tool_call" }) in
+  list.len(started) == 2
+}
+
+test "bpmn ingest maps activityCompleted to state_transition timeline event" {
+  let result = interop.bpmn_ingest(sample_bpmn_run()) in
+  let completed = list.filter(result.timeline_events, fn(e) { e.kind == "state_transition" }) in
+  list.len(completed) == 1
+}
+
+test "bpmn ingest maps incidentCreated to policy_violation timeline event" {
+  let result = interop.bpmn_ingest(sample_bpmn_run()) in
+  let violations = list.filter(result.timeline_events, fn(e) { e.kind == "policy_violation" }) in
+  list.len(violations) == 1 &&
+  str.contains(list.head(violations).summary, "blocked")
+}
+
+test "bpmn ingest maps variable events to human_state_edit timeline events" {
+  let result = interop.bpmn_ingest(sample_bpmn_run()) in
+  let var_events = list.filter(result.timeline_events, fn(e) { e.kind == "human_state_edit" }) in
+  list.len(var_events) == 1
+}
+
+test "bpmn ingest produces correct total timeline event count" {
+  let result = interop.bpmn_ingest(sample_bpmn_run()) in
+  list.len(result.timeline_events) == 5
+}
+
+// ─── VARIABLE PATCHES ─────────────────────────────────────────────────────────
+
+test "bpmn_extract_variable_patches converts variable events to ACP patches" {
+  let history_events = [
+    { type: "variableCreated", activity_id: "task1", assignee: "agent", timestamp_seq: 1, variables: { vendor_count: 2, selected: "vendor_a" } }
+  ] in
+  let patches = interop.bpmn_extract_variable_patches(history_events) in
+  list.len(patches) == 2 &&
+  list.any(patches, fn(p) { p.path == "var.vendor_count" && p.value == 2 }) &&
+  list.any(patches, fn(p) { p.path == "var.selected" && p.value == "vendor_a" })
+}
+
+test "bpmn_extract_variable_patches ignores non-variable events" {
+  let history_events = [
+    { type: "activityStarted", activity_id: "task1", assignee: "agent", timestamp_seq: 1 },
+    { type: "variableUpdated", activity_id: "task1", assignee: "agent", timestamp_seq: 2, variables: { stage: "review" } }
+  ] in
+  let patches = interop.bpmn_extract_variable_patches(history_events) in
+  list.len(patches) == 1 && list.head(patches).path == "var.stage"
+}
+
+// ─── ARTIFACT EXTRACTION ──────────────────────────────────────────────────────
+
+test "bpmn ingest extracts artifacts from activity outputs" {
+  let result = interop.bpmn_ingest(sample_bpmn_run()) in
+  result.artifact_count == 1 &&
+  list.head(result.artifacts).producer == "research_agent" &&
+  list.head(result.artifacts).content.summary == "Vendor A preferred"
+}
+
+// ─── EXPORT ───────────────────────────────────────────────────────────────────
+
+test "bpmn export produces process definition with activity instances" {
+  let ws = state.new_workflow("wf_vendor", "Select vendor", "ops") in
+  let g = plan.graph([
+    plan.node("research", "Collect Evidence", "research_agent", "done", "medium", "evidence"),
+    plan.node("legal", "Review Contract", "human", "pending", "high", "legal_findings")
+  ], [
+    plan.edge("research", "legal", "evidence required")
+  ]) in
+  let ws2 = state.set_plan(ws, g) in
+  let exported = interop.bpmn_export(ws2) in
+  exported.process_definition_key == "wf_vendor" &&
+  list.len(exported.activity_instances) == 2 &&
+  list.len(exported.sequence_flows) == 1
+}
+
+test "bpmn export maps done nodes to completed state" {
+  let ws = state.new_workflow("wf_vendor", "Select vendor", "ops") in
+  let g = plan.graph([
+    plan.node("research", "Research", "research_agent", "done", "medium", "evidence")
+  ], []) in
+  let ws2 = state.set_plan(ws, g) in
+  let exported = interop.bpmn_export(ws2) in
+  list.head(exported.activity_instances).state == "completed"
+}
+
+test "bpmn export maps human agent to UserTask activity type" {
+  let ws = state.new_workflow("wf_vendor", "Select vendor", "ops") in
+  let g = plan.graph([
+    plan.node("approval", "Approve Decision", "human", "pending", "high", "decision")
+  ], []) in
+  let ws2 = state.set_plan(ws, g) in
+  let exported = interop.bpmn_export(ws2) in
+  list.head(exported.activity_instances).activity_type == "UserTask"
+}
+
+test "bpmn export maps gated stage to SUSPENDED process state" {
+  let ws = state.new_workflow("wf_vendor", "Select vendor", "ops") in
+  let ws2 = state.set_stage(ws, "gated") in
+  let exported = interop.bpmn_export(ws2) in
+  exported.state == "SUSPENDED"
+}
+
+test "bpmn export embeds acp state hash in metadata" {
+  let ws = state.new_workflow("wf_vendor", "Select vendor", "ops") in
+  let exported = interop.bpmn_export(ws) in
+  str.starts_with(exported.metadata.acp_state_hash, "sha256:")
+}
+
+// ─── GENERIC DISPATCH ─────────────────────────────────────────────────────────
+
+test "generic ingest dispatches to bpmn adapter" {
+  let result = interop.ingest("bpmn", sample_bpmn_run()) in
+  result.framework == "bpmn" && list.len(result.plan.nodes) == 2
+}
+
+test "generic export dispatches to bpmn adapter" {
+  let ws = state.new_workflow("wf_vendor", "Select vendor", "ops") in
+  let exported = interop.export_to("bpmn", ws) in
+  rec.has(exported, "process_definition_key")
+}

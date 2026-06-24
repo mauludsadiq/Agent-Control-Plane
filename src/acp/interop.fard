@@ -81,6 +81,7 @@ fn extract_artifacts(framework, run_id, events, input_state_hash) {
       let producer = if rec.has(e, "node_id") then e.node_id
         else if rec.has(e, "agent_id") then e.agent_id
         else if rec.has(e, "worker_id") then e.worker_id
+        else if rec.has(e, "assignee") && e.assignee != null then e.assignee
         else "unknown" in
       let tool_used = if rec.has(e, "tool") then e.tool
         else if rec.has(e, "activity_type") then e.activity_type
@@ -337,6 +338,7 @@ fn ingest(framework, run) {
   if framework == "langgraph" then langgraph_ingest(run)
   else if framework == "crewai" then crewai_ingest(run)
   else if framework == "temporal" then temporal_ingest(run)
+  else if framework == "bpmn" then bpmn_ingest(run)
   else { ok: false, error: "UNKNOWN_FRAMEWORK", framework: framework }
 }
 
@@ -344,6 +346,7 @@ fn export_to(framework, workflow_state) {
   if framework == "langgraph" then langgraph_export(workflow_state)
   else if framework == "crewai" then crewai_export(workflow_state)
   else if framework == "temporal" then temporal_export(workflow_state)
+  else if framework == "bpmn" then bpmn_export(workflow_state)
   else { ok: false, error: "UNKNOWN_FRAMEWORK", framework: framework }
 }
 
@@ -352,7 +355,223 @@ export {
   langgraph_ingest, langgraph_export,
   crewai_ingest, crewai_export,
   temporal_ingest, temporal_export,
+  bpmn_ingest, bpmn_export, bpmn_extract_variable_patches,
   normalize_status, normalize_risk,
   trace_event, to_timeline_event,
   extract_artifacts, extract_artifact
+}
+
+// ─── BPMN / CAMUNDA ADAPTER ───────────────────────────────────────────────────
+//
+// BPMN process trace format (canonical subset, Camunda 7/8 history API):
+//
+//   process_instance:
+//     { id, process_definition_key, business_key, state }
+//
+//   activity_instance:
+//     { id, activity_id, activity_name, activity_type, assignee, state,
+//       variables: { key: value } }
+//
+//   history_event:
+//     { type, activity_id, assignee, timestamp_seq,
+//       variables: { key: value }, incident: { message, type } }
+//
+//   run:
+//     { process_instance, activity_instances, history_events }
+//
+// BPMN activity_type -> ACP plan node mapping:
+//   StartEvent       -> ignored (implicit in ACP seq: 0)
+//   EndEvent         -> final_decision marker node
+//   Task             -> standard plan node
+//   ServiceTask      -> plan node, agent = service worker
+//   UserTask         -> plan node, agent = assignee or "human"
+//   ScriptTask       -> plan node, agent = "system"
+//   SubProcess       -> plan node, output_schema = "subprocess"
+//   ExclusiveGateway -> edges only, no node (XOR routing)
+//   ParallelGateway  -> edges only, no node (AND split/join)
+//   InclusiveGateway -> edges only, no node (OR routing)
+//
+// BPMN history event type -> ACP timeline kind:
+//   activityStarted    -> tool_call
+//   activityCompleted  -> state_transition
+//   activityCancelled  -> policy_violation
+//   variableCreated    -> human_state_edit (variable patch)
+//   variableUpdated    -> human_state_edit (variable patch)
+//   incidentCreated    -> policy_violation
+//   processCompleted   -> state_transition
+
+fn bpmn_is_gateway(activity_type) {
+  activity_type == "ExclusiveGateway" ||
+  activity_type == "ParallelGateway" ||
+  activity_type == "InclusiveGateway" ||
+  activity_type == "EventBasedGateway"
+}
+
+fn bpmn_is_start_end(activity_type) {
+  activity_type == "StartEvent" ||
+  activity_type == "EndEvent" ||
+  activity_type == "BoundaryEvent"
+}
+
+fn bpmn_ingest_activity(activity) {
+  let agent = if rec.has(activity, "assignee") && activity.assignee != null
+    then activity.assignee
+    else if activity.activity_type == "ServiceTask" then
+      if rec.has(activity, "id") then activity.id else "service"
+    else if activity.activity_type == "ScriptTask" then "system"
+    else if activity.activity_type == "UserTask" then
+      if rec.has(activity, "assignee") then activity.assignee else "human"
+    else if activity.activity_type == "SubProcess" then "subprocess"
+    else activity.activity_id in
+  let risk = if rec.has(activity, "risk") then normalize_risk(activity.risk)
+    else if activity.activity_type == "SubProcess" then "high"
+    else if activity.activity_type == "UserTask" then "medium"
+    else "low" in
+  let schema = if activity.activity_type == "SubProcess" then "subprocess"
+    else if activity.activity_type == "EndEvent" then "final_decision"
+    else if rec.has(activity, "output_schema") then activity.output_schema
+    else activity.activity_type in
+  plan.node(
+    activity.activity_id,
+    if rec.has(activity, "activity_name") then activity.activity_name else activity.activity_id,
+    agent,
+    normalize_status(activity.state),
+    risk,
+    schema
+  )
+}
+
+fn bpmn_ingest_sequence_flow(flow) {
+  let reason = if rec.has(flow, "name") && flow.name != null then flow.name
+    else if rec.has(flow, "condition") then flow.condition
+    else "sequence" in
+  plan.edge(flow.source_ref, flow.target_ref, reason)
+}
+
+fn bpmn_ingest_history_event(h_event, process_id, seq) {
+  let actor = if rec.has(h_event, "assignee") && h_event.assignee != null
+    then h_event.assignee else "system" in
+  let activity_id = if rec.has(h_event, "activity_id") then h_event.activity_id else "process" in
+  if h_event.type == "activityCompleted" then
+    trace_event("bpmn", "state_transition", actor,
+      str.concat(["activity completed: ", activity_id]),
+      { process_id: process_id, activity_id: activity_id }, seq)
+  else if h_event.type == "activityStarted" then
+    trace_event("bpmn", "tool_call", actor,
+      str.concat(["activity started: ", activity_id]),
+      { process_id: process_id, activity_id: activity_id }, seq)
+  else if h_event.type == "activityCancelled" then
+    trace_event("bpmn", "policy_violation", actor,
+      str.concat(["activity cancelled: ", activity_id]),
+      { process_id: process_id, activity_id: activity_id }, seq)
+  else if h_event.type == "variableCreated" || h_event.type == "variableUpdated" then
+    let vars = if rec.has(h_event, "variables") then h_event.variables else {} in
+    trace_event("bpmn", "human_state_edit", actor,
+      str.concat(["variable ", h_event.type, ": ", activity_id]),
+      { process_id: process_id, activity_id: activity_id, variables: vars }, seq)
+  else if h_event.type == "incidentCreated" then
+    let msg = if rec.has(h_event, "incident") && rec.has(h_event.incident, "message")
+      then h_event.incident.message else "incident" in
+    trace_event("bpmn", "policy_violation", actor, msg,
+      { process_id: process_id, activity_id: activity_id,
+        incident: if rec.has(h_event, "incident") then h_event.incident else {} }, seq)
+  else if h_event.type == "processCompleted" then
+    trace_event("bpmn", "state_transition", actor,
+      str.concat(["process completed: ", process_id]),
+      { process_id: process_id }, seq)
+  else
+    trace_event("bpmn", h_event.type, actor, h_event.type,
+      { process_id: process_id, activity_id: activity_id }, seq)
+}
+
+// bpmn_extract_variable_patches converts BPMN history variable events
+// into ACP patch records for state reconstruction.
+fn bpmn_extract_variable_patches(history_events) {
+  let var_events = list.filter(history_events, fn(e) {
+    e.type == "variableCreated" || e.type == "variableUpdated"
+  }) in
+  list.flat_map(var_events, fn(e) {
+    if !rec.has(e, "variables") then []
+    else
+      let vars = e.variables in
+      list.map(rec.keys(vars), fn(k) {
+        { path: str.concat(["var.", k]), value: rec.get(vars, k) }
+      })
+  })
+}
+
+fn bpmn_ingest(bpmn_run) {
+  let process_id = bpmn_run.process_instance.id in
+  let input_state_hash = receipt.digest({ process_id: process_id, framework: "bpmn" }) in
+  let all_activities = bpmn_run.activity_instances in
+  let plan_activities = list.filter(all_activities, fn(a) {
+    !bpmn_is_gateway(a.activity_type) && !bpmn_is_start_end(a.activity_type)
+  }) in
+  let nodes = list.map(plan_activities, fn(a) { bpmn_ingest_activity(a) }) in
+  let flows = if rec.has(bpmn_run, "sequence_flows") then bpmn_run.sequence_flows else [] in
+  let edges = list.map(flows, fn(f) { bpmn_ingest_sequence_flow(f) }) in
+  let g = plan.graph(nodes, edges) in
+  let history_events = if rec.has(bpmn_run, "history_events") then bpmn_run.history_events else [] in
+  let events = list.map(
+    list.zip(history_events, list.range(1, list.len(history_events) + 1)),
+    fn(pair) { bpmn_ingest_history_event(list.get(pair, 0), process_id, list.get(pair, 1)) }
+  ) in
+  let timeline_events = list.map(events, fn(e) { to_timeline_event(e) }) in
+  let artifacts = extract_artifacts("bpmn", process_id, history_events, input_state_hash) in
+  let variable_patches = bpmn_extract_variable_patches(history_events) in
+  {
+    framework: "bpmn",
+    plan: g,
+    trace_events: events,
+    timeline_events: timeline_events,
+    artifacts: artifacts,
+    artifact_count: list.len(artifacts),
+    variable_patches: variable_patches,
+    process_id: process_id,
+    process_definition_key: bpmn_run.process_instance.process_definition_key
+  }
+}
+
+fn bpmn_export(workflow_state) {
+  let activities = list.map(workflow_state.plan.nodes, fn(n) {
+    let activity_type = if n.output_schema == "subprocess" then "SubProcess"
+      else if n.output_schema == "final_decision" then "EndEvent"
+      else if n.agent == "human" || n.agent == "operator" then "UserTask"
+      else if n.agent == "system" then "ScriptTask"
+      else "ServiceTask" in
+    {
+      activity_id: n.id,
+      activity_name: n.title,
+      activity_type: activity_type,
+      assignee: n.agent,
+      state: if n.status == "done" then "completed"
+        else if n.status == "in_progress" then "active"
+        else if n.status == "blocked" then "suspended"
+        else "waiting",
+      metadata: { acp_workflow_id: workflow_state.workflow_id, risk: n.risk }
+    }
+  }) in
+  let sequence_flows = list.map(workflow_state.plan.edges, fn(e) {
+    { source_ref: e.from, target_ref: e.to, name: e.reason }
+  }) in
+  let variables = rec.keys(workflow_state.variables) in
+  let camunda_vars = list.fold(variables, {}, fn(acc, k) {
+    rec.set(acc, k, rec.get(workflow_state.variables, k))
+  }) in
+  {
+    process_definition_key: workflow_state.workflow_id,
+    business_key: workflow_state.workflow_id,
+    state: if workflow_state.stage == "complete" then "COMPLETED"
+      else if workflow_state.stage == "gated" then "SUSPENDED"
+      else "ACTIVE",
+    activity_instances: activities,
+    sequence_flows: sequence_flows,
+    variables: camunda_vars,
+    metadata: {
+      acp_workflow_id: workflow_state.workflow_id,
+      acp_stage: workflow_state.stage,
+      acp_seq: workflow_state.seq,
+      acp_state_hash: receipt.digest(workflow_state)
+    }
+  }
 }

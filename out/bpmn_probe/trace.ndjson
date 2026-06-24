@@ -1,0 +1,11 @@
+{"cid":"sha256:0a0aa758b17eaa66761c24243532e71987934a6b25b991a39b5187188464ae53","kind":"rel","name":"../src/acp/interop","t":"module_resolve"}
+{"cid":"sha256:2d128f8f8ea9368d1d88d2ca9a6b1202e3e1a2cf5fd974a11b3a697cca1db448","kind":"std","name":"std/list","t":"module_resolve"}
+{"cid":"sha256:8dff43a3f5b27efa3286132064b6e04f5a2acd609e35bdb2907605fb1a984736","kind":"std","name":"std/rec","t":"module_resolve"}
+{"cid":"sha256:e1969d3d0193bc0d79d65c69bb895f85c5b96b9c3b5f182c98c63e71a47b057f","kind":"std","name":"std/str","t":"module_resolve"}
+{"cid":"sha256:7069358c1bf7e6bc78205a9bdfe44d9532282915a5b3c43aae81579c454ed7c6","kind":"rel","name":"receipt","t":"module_resolve"}
+{"cid":"sha256:079b7806d7457a3a32a8dd66d0c8ea06bfdfa5866e33903a291cc43450535630","kind":"std","name":"std/json","t":"module_resolve"}
+{"cid":"sha256:b0de910c64590d63d8e1fbf2aa2bb1aea3eb3e8c693fb0119857a15b4b202afa","kind":"std","name":"std/hash","t":"module_resolve"}
+{"cid":"sha256:59c5a68c428398b462979178a7682db6871fa3af71b4141063a12768d4d37615","kind":"rel","name":"plan","t":"module_resolve"}
+{"cid":"sha256:adf7201976c9f74ee2e64738def47f10ea09c853555783fd73e6a40eba34ce9d","kind":"rel","name":"timeline","t":"module_resolve"}
+{"cid":"sha256:843e47a3fa14b3b7367f4a9fb386f4709ed03204f76451c851df0e01dce613c4","kind":"rel","name":"artifact","t":"module_resolve"}
+{"cid":"sha256:2a0a0c8fccbf2faf28e9fa8456b03c2c6d3f157f2e484b281f5b945437783d6a","t":"module_graph"}
