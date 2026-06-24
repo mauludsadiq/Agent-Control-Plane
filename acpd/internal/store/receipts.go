@@ -15,7 +15,7 @@ CreatedAt          time.Time
 }
 
 func (d *DB) AppendReceipt(tx *sql.Tx, r *Receipt) error {
-_, err := tx.Exec(`
+_, err := txExec(d, tx, `
 INSERT INTO receipts (workflow_id, seq, receipt_digest, receipt_json, prev_receipt_digest, created_at)
 VALUES (?, ?, ?, ?, ?, ?)`,
 r.WorkflowID, r.Seq, r.ReceiptDigest, r.ReceiptJSON,
@@ -25,7 +25,7 @@ return err
 }
 
 func (d *DB) GetReceipts(workflowID string) ([]*Receipt, error) {
-rows, err := d.sql.Query(`
+rows, err := d.query(`
 SELECT workflow_id, seq, receipt_digest, receipt_json, prev_receipt_digest, created_at
 FROM receipts WHERE workflow_id = ? ORDER BY seq ASC`, workflowID)
 if err != nil {
@@ -36,7 +36,7 @@ return scanReceipts(rows)
 }
 
 func (d *DB) GetReceiptsSince(workflowID string, fromSeq int) ([]*Receipt, error) {
-rows, err := d.sql.Query(`
+rows, err := d.query(`
 SELECT workflow_id, seq, receipt_digest, receipt_json, prev_receipt_digest, created_at
 FROM receipts WHERE workflow_id = ? AND seq >= ? ORDER BY seq ASC`,
 workflowID, fromSeq)
@@ -49,7 +49,7 @@ return scanReceipts(rows)
 
 func (d *DB) GetLatestReceiptDigest(workflowID string) (string, error) {
 var digest string
-err := d.sql.QueryRow(`
+err := d.queryRow(`
 SELECT receipt_digest FROM receipts WHERE workflow_id = ?
 ORDER BY seq DESC LIMIT 1`, workflowID).Scan(&digest)
 if err == sql.ErrNoRows {

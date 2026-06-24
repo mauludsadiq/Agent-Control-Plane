@@ -14,16 +14,14 @@ CreatedAt    time.Time
 }
 
 func (d *DB) SaveArtifact(tx *sql.Tx, a *Artifact) error {
-_, err := tx.Exec(`
-INSERT OR IGNORE INTO artifacts (digest, workflow_id, artifact_json, content_ref, created_at)
-VALUES (?, ?, ?, ?, ?)`,
+_, err := txExec(d, tx, d.insertOrIgnoreArtifact(),
 a.Digest, a.WorkflowID, a.ArtifactJSON, nullString(a.ContentRef), now(),
 )
 return err
 }
 
 func (d *DB) GetArtifact(digest string) (*Artifact, error) {
-row := d.sql.QueryRow(`
+row := d.queryRow(`
 SELECT digest, workflow_id, artifact_json, content_ref, created_at
 FROM artifacts WHERE digest = ?`, digest)
 var a Artifact
@@ -42,7 +40,7 @@ return &a, nil
 }
 
 func (d *DB) ListArtifacts(workflowID string) ([]*Artifact, error) {
-rows, err := d.sql.Query(`
+rows, err := d.query(`
 SELECT digest, workflow_id, artifact_json, content_ref, created_at
 FROM artifacts WHERE workflow_id = ? ORDER BY created_at ASC`, workflowID)
 if err != nil {

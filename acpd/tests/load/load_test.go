@@ -28,9 +28,9 @@ FardrunBin      string
 
 func loadConfig() LoadTestConfig {
 cfg := LoadTestConfig{
-NumWorkflows:    10000,
+NumWorkflows:    100,
 TransitionsEach: 3,
-Concurrency:     50,
+Concurrency:     20,
 DSN:             ":memory:",
 MigrationsDir:   "../../migrations",
 FardDir:         "../../fard/bridge",

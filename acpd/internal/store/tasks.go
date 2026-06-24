@@ -25,7 +25,7 @@ UpdatedAt        time.Time
 }
 
 func (d *DB) EnqueueTask(tx *sql.Tx, t *Task) error {
-_, err := tx.Exec(`
+_, err := txExec(d, tx, `
 INSERT INTO tasks (task_id, workflow_id, node_id, agent, status, priority, input_json, timeout_sec, created_at, updated_at)
 VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
 t.TaskID, t.WorkflowID, t.NodeID, t.Agent, t.Priority,
@@ -37,7 +37,7 @@ return err
 func (d *DB) ClaimNextTask(agent string) (*Task, error) {
 var t *Task
 err := d.Tx(func(tx *sql.Tx) error {
-row := tx.QueryRow(`
+row := txQueryRow(d, tx, `
 SELECT task_id, workflow_id, node_id, agent, status, priority, input_json,
        output_json, policy_result_json, claimed_by, claimed_at, timeout_sec,
        completed_at, failed_reason, created_at, updated_at
@@ -50,7 +50,7 @@ t, err = scanTask(row)
 if err != nil || t == nil {
 return err
 }
-_, err = tx.Exec(`
+_, err = txExec(d, tx, `
 UPDATE tasks SET status='claimed', claimed_by=?, claimed_at=?, updated_at=?
 WHERE task_id=? AND status='pending'`,
 agent, now(), now(), t.TaskID,
@@ -61,7 +61,7 @@ return t, err
 }
 
 func (d *DB) CompleteTask(tx *sql.Tx, taskID, outputJSON, policyResultJSON string) error {
-_, err := tx.Exec(`
+_, err := txExec(d, tx, `
 UPDATE tasks SET status='completed', output_json=?, policy_result_json=?, completed_at=?, updated_at=?
 WHERE task_id=?`,
 outputJSON, policyResultJSON, now(), now(), taskID,
@@ -70,7 +70,7 @@ return err
 }
 
 func (d *DB) FailTask(tx *sql.Tx, taskID, reason string) error {
-_, err := tx.Exec(`
+_, err := txExec(d, tx, `
 UPDATE tasks SET status='failed', failed_reason=?, updated_at=? WHERE task_id=?`,
 reason, now(), taskID,
 )
@@ -78,7 +78,7 @@ return err
 }
 
 func (d *DB) RequeueExpiredTasks() (int, error) {
-res, err := d.sql.Exec(`
+res, err := d.exec(`
 UPDATE tasks SET status='pending', claimed_by=NULL, claimed_at=NULL, updated_at=?
 WHERE status='claimed'
 AND datetime(claimed_at, '+' || timeout_sec || ' seconds') < datetime('now')`,
@@ -92,7 +92,7 @@ return int(n), nil
 }
 
 func (d *DB) GetTask(taskID string) (*Task, error) {
-row := d.sql.QueryRow(`
+row := d.queryRow(`
 SELECT task_id, workflow_id, node_id, agent, status, priority, input_json,
        output_json, policy_result_json, claimed_by, claimed_at, timeout_sec,
        completed_at, failed_reason, created_at, updated_at
@@ -111,7 +111,7 @@ q += ` AND status=?`
 args = append(args, status)
 }
 q += ` ORDER BY created_at ASC`
-rows, err := d.sql.Query(q, args...)
+rows, err := d.query(q, args...)
 if err != nil {
 return nil, err
 }

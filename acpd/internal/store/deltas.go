@@ -15,7 +15,7 @@ CreatedAt     time.Time
 }
 
 func (d *DB) AppendDelta(tx *sql.Tx, delta *Delta) error {
-_, err := tx.Exec(`
+_, err := txExec(d, tx, `
 INSERT INTO deltas (workflow_id, seq, delta_json, delta_hash, prev_delta_hash, created_at)
 VALUES (?, ?, ?, ?, ?, ?)`,
 delta.WorkflowID, delta.Seq, delta.DeltaJSON, delta.DeltaHash,
@@ -25,7 +25,7 @@ return err
 }
 
 func (d *DB) GetDeltasSince(workflowID string, fromSeq int) ([]*Delta, error) {
-rows, err := d.sql.Query(`
+rows, err := d.query(`
 SELECT workflow_id, seq, delta_json, delta_hash, prev_delta_hash, created_at
 FROM deltas WHERE workflow_id = ? AND seq > ?
 ORDER BY seq ASC`, workflowID, fromSeq)
@@ -51,7 +51,7 @@ return out, rows.Err()
 
 func (d *DB) GetLatestDeltaHash(workflowID string) (string, error) {
 var hash sql.NullString
-err := d.sql.QueryRow(`
+err := d.queryRow(`
 SELECT delta_hash FROM deltas WHERE workflow_id = ?
 ORDER BY seq DESC LIMIT 1`, workflowID).Scan(&hash)
 if err == sql.ErrNoRows {

@@ -27,7 +27,7 @@ func (d *DB) CreateActor(a *Actor, apiKey string) error {
 rolesJSON, _ := json.Marshal(a.Roles)
 agentsJSON, _ := json.Marshal(a.AllowedAgents)
 workflowsJSON, _ := json.Marshal(a.AllowedWorkflows)
-_, err := d.sql.Exec(`
+_, err := d.exec(`
 INSERT INTO actors (actor_id, api_key_hash, roles_json, allowed_agents_json, allowed_workflows_json, created_at, updated_at)
 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 a.ActorID, HashAPIKey(apiKey),
@@ -39,7 +39,7 @@ return err
 
 func (d *DB) ResolveAPIKey(apiKey string) (*Actor, error) {
 hash := HashAPIKey(apiKey)
-row := d.sql.QueryRow(`
+row := d.queryRow(`
 SELECT actor_id, api_key_hash, roles_json, allowed_agents_json, allowed_workflows_json, created_at, updated_at
 FROM actors WHERE api_key_hash = ?`, hash)
 var a Actor
