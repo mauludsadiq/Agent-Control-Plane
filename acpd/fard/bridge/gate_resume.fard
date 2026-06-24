@@ -11,7 +11,7 @@ import("../../../src/acp/receipt") as receipt
 let input = json.decode(io.read_file(env.get("ACP_INPUT_FILE").some).ok)
 let s = json.decode(input.state_json)
 let pol = policy.default_enterprise_policy()
-let actor_rec = runtime.actor(input.actor.id, input.actor.roles)
+let actor_rec = runtime.actor(input.actor.actor_id, input.actor.roles)
 let tool_version = if rec.has(input, "tool_version") then input.tool_version else "human"
 
 let result = gate.resume(actor_rec, s, pol, tool_version, input.token, input.resolution)

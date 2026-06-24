@@ -118,10 +118,9 @@ if err != nil {
 return fmt.Errorf("insert delta: %w", err)
 }
 
-// 4. Determine new snapshot_seq
-newSnapshotSeq := snapshotSeq
-takeSnapshot := seq == 1 || (p.SnapshotEvery > 0 && seq%p.SnapshotEvery == 0)
-if takeSnapshot {
+// 4. Always save latest snapshot so GetLatestSnapshot returns current state.
+// Additionally save a permanent snapshot at interval boundaries for
+// efficient delta reconstruction at arbitrary seq.
 _, err = tx.Exec(`
 INSERT OR REPLACE INTO workflow_snapshots (workflow_id, seq, state_json, state_hash, created_at)
 VALUES (?, ?, ?, ?, ?)`,
@@ -130,8 +129,7 @@ p.WorkflowID, seq, p.Result.StateJSON, p.Result.StateHash, now(),
 if err != nil {
 return fmt.Errorf("insert snapshot: %w", err)
 }
-newSnapshotSeq = seq
-}
+newSnapshotSeq := seq
 
 // 5. Update workflow summary row
 stage := p.Result.Stage
@@ -236,8 +234,6 @@ return fmt.Errorf("insert artifact delta: %w", err)
 }
 
 // Snapshot if interval hit
-newSnapshotSeq := snapshotSeq
-if seq == 1 || (p.SnapshotEvery > 0 && seq%p.SnapshotEvery == 0) {
 _, err = tx.Exec(`
 INSERT OR REPLACE INTO workflow_snapshots (workflow_id, seq, state_json, state_hash, created_at)
 VALUES (?, ?, ?, ?, ?)`,
@@ -246,8 +242,7 @@ p.WorkflowID, seq, p.Result.StateJSON, p.Result.StateHash, now(),
 if err != nil {
 return fmt.Errorf("insert artifact snapshot: %w", err)
 }
-newSnapshotSeq = seq
-}
+newSnapshotSeq := seq
 
 // Parse stage from state
 stage := p.Result.Stage
@@ -334,8 +329,6 @@ if err != nil {
 return fmt.Errorf("gate delta: %w", err)
 }
 
-newSnapshotSeq := snapshotSeq
-if seq == 1 || (snapshotEvery > 0 && seq%snapshotEvery == 0) {
 _, err = tx.Exec(`
 INSERT OR REPLACE INTO workflow_snapshots (workflow_id, seq, state_json, state_hash, created_at)
 VALUES (?, ?, ?, ?, ?)`,
@@ -344,8 +337,7 @@ workflowID, seq, result.StateJSON, result.StateHash, now(),
 if err != nil {
 return fmt.Errorf("gate snapshot: %w", err)
 }
-newSnapshotSeq = seq
-}
+newSnapshotSeq := seq
 
 stage := result.Stage
 if stage == "" {

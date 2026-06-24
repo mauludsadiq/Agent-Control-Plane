@@ -11,7 +11,7 @@ import("../../../src/acp/receipt") as receipt
 let input = json.decode(io.read_file(env.get("ACP_INPUT_FILE").some).ok)
 let s = json.decode(input.state_json)
 let pol = policy.default_enterprise_policy()
-let actor_rec = runtime.actor(input.actor.id, input.actor.roles)
+let actor_rec = runtime.actor(input.actor.actor_id, input.actor.roles)
 let deadline_seq = if rec.has(input, "deadline_seq") then input.deadline_seq else 20
 let context = if rec.has(input, "context") then input.context else ({ })
 

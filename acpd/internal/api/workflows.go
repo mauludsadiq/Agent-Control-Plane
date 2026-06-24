@@ -250,18 +250,27 @@ if err != nil {
 writeErr(w, http.StatusInternalServerError, err.Error())
 return
 }
+// Pass receipt_json strings so FARD bridge can decode them correctly
+receiptWrappers := make([]map[string]any, 0, len(receipts))
+for _, r := range receipts {
+receiptWrappers = append(receiptWrappers, map[string]any{
+"receipt_json": r.ReceiptJSON,
+})
+}
 var result struct {
 ChainRoot     string `json:"chain_root"`
 ChainVerified bool   `json:"chain_verified"`
+ReceiptCount  int    `json:"receipt_count"`
 }
 _ = h.br.RunAndUnmarshal("verify_chain.fard", map[string]any{
-"receipts": receipts,
+"receipts": receiptWrappers,
 }, &result)
 writeJSON(w, http.StatusOK, map[string]any{
 "ok":             true,
 "receipts":       receipts,
 "chain_root":     result.ChainRoot,
 "chain_verified": result.ChainVerified,
+"receipt_count":  result.ReceiptCount,
 })
 }
 
@@ -279,18 +288,30 @@ writeErr(w, http.StatusBadRequest, "invalid body")
 return
 }
 actor := auth.ActorFromContext(r.Context())
+// For replay we need the seq-0 baseline state
 snap, err := h.db.GetSnapshotAtSeq(id, 0)
+if err != nil {
+writeErr(w, http.StatusInternalServerError, err.Error())
+return
+}
+if snap == nil {
+// Fall back to workflow creation state
+snap, err = h.db.GetLatestSnapshot(id)
 if err != nil || snap == nil {
 writeErr(w, http.StatusNotFound, "initial state not found")
 return
 }
+}
 var result any
-_ = h.br.RunAndUnmarshal("replay.fard", map[string]any{
+if err := h.br.RunAndUnmarshal("replay.fard", map[string]any{
 "initial_state_json": snap.StateJSON,
 "actor":              actor,
 "events":             req.Events,
 "tool_version":       req.ToolVersion,
-}, &result)
+}, &result); err != nil {
+writeErr(w, http.StatusInternalServerError, "replay failed: "+err.Error())
+return
+}
 writeJSON(w, http.StatusOK, map[string]any{"ok": true, "replay": result})
 }
 
