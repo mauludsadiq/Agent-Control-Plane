@@ -1,0 +1,172 @@
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+import("receipt") as receipt
+
+// Anchor layer for external chain commitment.
+//
+// ACP produces anchor payloads from receipt chain roots.
+// The deployment infrastructure submits payloads to an external system
+// (Ethereum, Flare, RFC 3161 timestamping authority, Certificate Transparency log)
+// and returns anchor proofs. ACP verifies proofs are consistent with
+// the chain root — it does not trust the external system blindly.
+//
+// Separation of concerns:
+//   ACP          produces payload, verifies proof consistency
+//   Backend      submits to external system, returns proof
+//   Verifier     any third party with the receipt list can recompute
+//                the chain root and check it matches the anchored payload
+
+// make_payload produces the canonical anchor payload for a seq range.
+// This is what gets submitted to the external anchoring backend.
+// seq_from: first seq covered (inclusive)
+// seq_to:   last seq covered (inclusive)
+// chain_root_hash: receipt.chain_root(receipts) for receipts in range
+// workflow_id: workflow being anchored
+fn make_payload(workflow_id, seq_from, seq_to, chain_root_hash, policy_version) {
+  let body = {
+    anchor_type: "acp.anchor.v1",
+    workflow_id: workflow_id,
+    seq_from: seq_from,
+    seq_to: seq_to,
+    chain_root: chain_root_hash,
+    policy_version: policy_version
+  } in
+  { ...body, payload_digest: receipt.digest(body) }
+}
+
+// make_proof wraps an anchor payload with the external reference
+// returned by the anchoring backend after submission.
+// external_ref: backend-specific locator
+//   on-chain:  { kind: "ethereum", tx_hash: "0x...", block: 12345, network: "mainnet" }
+//   timestamp: { kind: "rfc3161", tsa: "timestamp.digicert.com", token_digest: "sha256:..." }
+//   ct_log:    { kind: "ct_log", log_id: "...", leaf_index: 42, tree_size: 1000000 }
+fn make_proof(payload, external_ref, anchored_by) {
+  let body = {
+    proof_type: "acp.anchor_proof.v1",
+    payload: payload,
+    external_ref: external_ref,
+    anchored_by: anchored_by
+  } in
+  { ...body, proof_digest: receipt.digest(body) }
+}
+
+// verify_payload confirms a payload is internally consistent:
+// the payload_digest matches the body, and the chain_root matches
+// the provided receipts. Any third party with the receipt list
+// can run this without trusting the ACP operator.
+fn verify_payload(payload, receipts) {
+  let expected_root = receipt.chain_root(receipts) in
+  let body = {
+    anchor_type: payload.anchor_type,
+    workflow_id: payload.workflow_id,
+    seq_from: payload.seq_from,
+    seq_to: payload.seq_to,
+    chain_root: payload.chain_root,
+    policy_version: payload.policy_version
+  } in
+  let expected_digest = receipt.digest(body) in
+  let root_matches = payload.chain_root == expected_root in
+  let digest_matches = payload.payload_digest == expected_digest in
+  {
+    ok: root_matches && digest_matches,
+    root_matches: root_matches,
+    digest_matches: digest_matches,
+    expected_root: expected_root,
+    actual_root: payload.chain_root,
+    payload_digest: payload.payload_digest,
+    expected_digest: expected_digest
+  }
+}
+
+// verify_proof confirms a proof is consistent with its payload
+// and that the payload is consistent with the provided receipts.
+fn verify_proof(proof, receipts) {
+  let payload_check = verify_payload(proof.payload, receipts) in
+  let proof_body = {
+    proof_type: proof.proof_type,
+    payload: proof.payload,
+    external_ref: proof.external_ref,
+    anchored_by: proof.anchored_by
+  } in
+  let expected_proof_digest = receipt.digest(proof_body) in
+  let proof_digest_matches = proof.proof_digest == expected_proof_digest in
+  {
+    ok: payload_check.ok && proof_digest_matches,
+    payload_ok: payload_check.ok,
+    proof_digest_matches: proof_digest_matches,
+    root_matches: payload_check.root_matches,
+    digest_matches: payload_check.digest_matches,
+    external_ref: proof.external_ref
+  }
+}
+
+// anchor_log maintains an ordered list of proofs for a workflow.
+// Proofs are append-only — earlier anchors are never removed.
+fn new_log() {
+  { anchor_log_type: "acp.anchor_log.v1", proofs: [] }
+}
+
+fn append_proof(log, proof) {
+  { ...log, proofs: list.append(log.proofs, proof) }
+}
+
+// latest_proof returns the most recently added proof, if any.
+fn latest_proof(log) {
+  if list.len(log.proofs) == 0 then { has_proof: false }
+  else { has_proof: true, proof: list.last(log.proofs) }
+}
+
+// coverage returns the seq ranges covered by all proofs in the log.
+fn coverage(log) {
+  list.map(log.proofs, fn(p) {
+    {
+      seq_from: p.payload.seq_from,
+      seq_to: p.payload.seq_to,
+      chain_root: p.payload.chain_root,
+      external_ref: p.external_ref,
+      proof_digest: p.proof_digest
+    }
+  })
+}
+
+// is_anchored checks whether a specific seq is covered by any proof.
+fn is_anchored(log, seq) {
+  list.any(log.proofs, fn(p) {
+    p.payload.seq_from <= seq && seq <= p.payload.seq_to
+  })
+}
+
+// gap_report identifies seq ranges not yet covered by any anchor proof.
+// Returns list of { seq_from, seq_to } gaps given the current max seq.
+fn gap_report(log, max_seq) {
+  let covered = list.map(log.proofs, fn(p) { { from: p.payload.seq_from, to: p.payload.seq_to } }) in
+  let sorted = list.sort_by(covered, fn(a, b) { a.from - b.from }) in
+  let result = list.fold(sorted, { gaps: [], cursor: 1 }, fn(acc, range) {
+    if acc.cursor < range.from then
+      { gaps: list.append(acc.gaps, { seq_from: acc.cursor, seq_to: range.from - 1 }), cursor: range.to + 1 }
+    else
+      { gaps: acc.gaps, cursor: if range.to + 1 > acc.cursor then range.to + 1 else acc.cursor }
+  }) in
+  if result.cursor <= max_seq then
+    list.append(result.gaps, { seq_from: result.cursor, seq_to: max_seq })
+  else
+    result.gaps
+}
+
+// summary produces a human-readable anchor status for a workflow.
+fn summary(log, max_seq) {
+  let gaps = gap_report(log, max_seq) in
+  {
+    proof_count: list.len(log.proofs),
+    fully_anchored: list.len(gaps) == 0,
+    gaps: gaps,
+    coverage: coverage(log)
+  }
+}
+
+export {
+  make_payload, make_proof,
+  verify_payload, verify_proof,
+  new_log, append_proof, latest_proof, coverage, is_anchored, gap_report, summary
+}

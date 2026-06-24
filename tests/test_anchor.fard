@@ -1,0 +1,134 @@
+import("../src/acp/anchor") as anchor
+import("../src/acp/state") as state
+import("../src/acp/policy") as policy
+import("../src/acp/runtime") as runtime
+import("../src/acp/receipt") as receipt
+import("std/list") as list
+
+// Build a small receipt list from real transitions
+fn make_test_receipts() {
+  let p = policy.default_enterprise_policy() in
+  let s0 = state.new_workflow("wf_anchor", "anchor test", "ops") in
+  let a = runtime.actor("operator:1", ["operator"]) in
+  let r1 = runtime.human_state_edit(a, s0, p, [{ path: "stage", value: "research" }]) in
+  let r2 = runtime.human_state_edit(a, r1.state, p, [{ path: "stage", value: "review" }]) in
+  [r1.receipt, r2.receipt]
+}
+
+test "payload digest is internally consistent" {
+  let receipts = make_test_receipts() in
+  let root = receipt.chain_root(receipts) in
+  let payload = anchor.make_payload("wf_anchor", 1, 2, root, "ACP-POLICY-1.0.0") in
+  payload.payload_digest != "" && payload.chain_root == root
+}
+
+test "verify_payload passes for correct receipts" {
+  let receipts = make_test_receipts() in
+  let root = receipt.chain_root(receipts) in
+  let payload = anchor.make_payload("wf_anchor", 1, 2, root, "ACP-POLICY-1.0.0") in
+  let result = anchor.verify_payload(payload, receipts) in
+  result.ok && result.root_matches && result.digest_matches
+}
+
+test "verify_payload fails when receipts do not match chain root" {
+  let receipts = make_test_receipts() in
+  let root = receipt.chain_root(receipts) in
+  let payload = anchor.make_payload("wf_anchor", 1, 2, root, "ACP-POLICY-1.0.0") in
+  let p = policy.default_enterprise_policy() in
+  let s0 = state.new_workflow("wf_other", "other", "ops") in
+  let a = runtime.actor("operator:1", ["operator"]) in
+  let other_r = runtime.human_state_edit(a, s0, p, [{ path: "stage", value: "research" }]) in
+  let wrong_receipts = [other_r.receipt] in
+  let result = anchor.verify_payload(payload, wrong_receipts) in
+  !result.ok && !result.root_matches
+}
+
+test "proof wraps payload with external reference" {
+  let receipts = make_test_receipts() in
+  let root = receipt.chain_root(receipts) in
+  let payload = anchor.make_payload("wf_anchor", 1, 2, root, "ACP-POLICY-1.0.0") in
+  let ext_ref = { kind: "ethereum", tx_hash: "0xabc123", block: 99999, network: "mainnet" } in
+  let proof = anchor.make_proof(payload, ext_ref, "anchor-service:1") in
+  proof.proof_digest != "" && proof.external_ref.kind == "ethereum"
+}
+
+test "verify_proof passes for valid proof and receipts" {
+  let receipts = make_test_receipts() in
+  let root = receipt.chain_root(receipts) in
+  let payload = anchor.make_payload("wf_anchor", 1, 2, root, "ACP-POLICY-1.0.0") in
+  let ext_ref = { kind: "rfc3161", tsa: "timestamp.digicert.com", token_digest: "sha256:abc" } in
+  let proof = anchor.make_proof(payload, ext_ref, "anchor-service:1") in
+  let result = anchor.verify_proof(proof, receipts) in
+  result.ok && result.payload_ok && result.proof_digest_matches
+}
+
+test "verify_proof fails when proof digest is tampered" {
+  let receipts = make_test_receipts() in
+  let root = receipt.chain_root(receipts) in
+  let payload = anchor.make_payload("wf_anchor", 1, 2, root, "ACP-POLICY-1.0.0") in
+  let ext_ref = { kind: "ct_log", log_id: "abc", leaf_index: 42, tree_size: 1000000 } in
+  let proof = anchor.make_proof(payload, ext_ref, "anchor-service:1") in
+  let tampered = { ...proof, proof_digest: "sha256:tampered" } in
+  let result = anchor.verify_proof(tampered, receipts) in
+  !result.ok && !result.proof_digest_matches
+}
+
+test "anchor log appends proofs and tracks coverage" {
+  let receipts = make_test_receipts() in
+  let root = receipt.chain_root(receipts) in
+  let payload = anchor.make_payload("wf_anchor", 1, 2, root, "ACP-POLICY-1.0.0") in
+  let ext_ref = { kind: "ethereum", tx_hash: "0xabc", block: 1, network: "mainnet" } in
+  let proof = anchor.make_proof(payload, ext_ref, "anchor-service:1") in
+  let log = anchor.append_proof(anchor.new_log(), proof) in
+  list.len(log.proofs) == 1 && anchor.is_anchored(log, 1) && anchor.is_anchored(log, 2)
+}
+
+test "is_anchored returns false for unanchored seq" {
+  let log = anchor.new_log() in
+  !anchor.is_anchored(log, 5)
+}
+
+test "gap_report identifies unanchored ranges" {
+  let receipts = make_test_receipts() in
+  let root = receipt.chain_root(receipts) in
+  let payload = anchor.make_payload("wf_anchor", 1, 2, root, "ACP-POLICY-1.0.0") in
+  let ext_ref = { kind: "ethereum", tx_hash: "0xabc", block: 1, network: "mainnet" } in
+  let proof = anchor.make_proof(payload, ext_ref, "anchor-service:1") in
+  let log = anchor.append_proof(anchor.new_log(), proof) in
+  let gaps = anchor.gap_report(log, 5) in
+  list.len(gaps) == 1 && list.head(gaps).seq_from == 3 && list.head(gaps).seq_to == 5
+}
+
+test "gap_report returns empty when fully anchored" {
+  let receipts = make_test_receipts() in
+  let root = receipt.chain_root(receipts) in
+  let payload = anchor.make_payload("wf_anchor", 1, 2, root, "ACP-POLICY-1.0.0") in
+  let ext_ref = { kind: "ethereum", tx_hash: "0xabc", block: 1, network: "mainnet" } in
+  let proof = anchor.make_proof(payload, ext_ref, "anchor-service:1") in
+  let log = anchor.append_proof(anchor.new_log(), proof) in
+  let gaps = anchor.gap_report(log, 2) in
+  list.len(gaps) == 0
+}
+
+test "summary reports fully anchored status" {
+  let receipts = make_test_receipts() in
+  let root = receipt.chain_root(receipts) in
+  let payload = anchor.make_payload("wf_anchor", 1, 2, root, "ACP-POLICY-1.0.0") in
+  let ext_ref = { kind: "ethereum", tx_hash: "0xabc", block: 1, network: "mainnet" } in
+  let proof = anchor.make_proof(payload, ext_ref, "anchor-service:1") in
+  let log = anchor.append_proof(anchor.new_log(), proof) in
+  let s = anchor.summary(log, 2) in
+  s.fully_anchored && s.proof_count == 1 && list.len(s.gaps) == 0
+}
+
+test "latest_proof returns most recent proof" {
+  let receipts = make_test_receipts() in
+  let root = receipt.chain_root(receipts) in
+  let p1 = anchor.make_payload("wf_anchor", 1, 2, root, "ACP-POLICY-1.0.0") in
+  let p2 = anchor.make_payload("wf_anchor", 3, 4, root, "ACP-POLICY-1.0.0") in
+  let proof1 = anchor.make_proof(p1, { kind: "ethereum", tx_hash: "0x1", block: 1, network: "mainnet" }, "svc") in
+  let proof2 = anchor.make_proof(p2, { kind: "ethereum", tx_hash: "0x2", block: 2, network: "mainnet" }, "svc") in
+  let log = anchor.append_proof(anchor.append_proof(anchor.new_log(), proof1), proof2) in
+  let latest = anchor.latest_proof(log) in
+  latest.has_proof && latest.proof.payload.seq_from == 3
+}
