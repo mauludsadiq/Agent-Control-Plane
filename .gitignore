@@ -1,0 +1,23 @@
+# Load test output — receipt files are ephemeral test artifacts
+acpd/tests/load/receipts/
+acpd/tests/receipts/
+
+# Build artifacts
+acpd/acpd
+acpd/acp
+
+# SQLite databases
+*.db
+*.db-wal
+*.db-shm
+
+# Bridge temp dirs
+acpd-bridge-*
+acp-demo-*
+acp-load-*
+
+# Go test cache
+*.test
+
+# OS
+.DS_Store
