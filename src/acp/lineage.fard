@@ -1,0 +1,105 @@
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+import("receipt") as receipt
+import("state") as state
+import("replay") as replay
+
+fn make_branch(branch_id, parent_id, branch_point_seq, branch_point_hash, reason) {
+  {
+    lineage_type: "acp.branch.v1",
+    branch_id: branch_id,
+    parent_id: parent_id,
+    branch_point_seq: branch_point_seq,
+    branch_point_hash: branch_point_hash,
+    reason: reason,
+    created_at_digest: receipt.digest({ branch_id: branch_id, parent_id: parent_id, branch_point_seq: branch_point_seq })
+  }
+}
+
+// fork creates a new workflow state branched from a parent state.
+// The forked state gets a new workflow_id but inherits all logical
+// state (stage, variables, plan, artifacts, approvals) from the branch
+// point. Timeline and violations are reset — the fork is a clean slate.
+fn fork(parent_state, new_workflow_id, branch_point_seq, reason) {
+  let branch = make_branch(new_workflow_id, parent_state.workflow_id, branch_point_seq, receipt.digest(parent_state), reason) in
+  let forked_state = {
+    ...parent_state,
+    workflow_id: new_workflow_id,
+    seq: 0,
+    timeline: [],
+    violations: [],
+    lineage: branch
+  } in
+  { ok: true, state: forked_state, branch: branch }
+}
+
+// fork_from_replay replays a parent up to branch_point_seq then forks.
+// Events must carry a seq field for filtering.
+fn fork_from_replay(initial_state, policy_rec, actor_rec, events, tool_version, branch_point_seq, new_workflow_id, reason) {
+  let events_to_branch = list.filter(events, fn(e) {
+    rec.has(e, "seq") && e.seq <= branch_point_seq
+  }) in
+  let replay_result = replay.replay(initial_state, policy_rec, actor_rec, events_to_branch, tool_version) in
+  if !replay_result.ok then { ok: false, error: "REPLAY_FAILED_AT_BRANCH_POINT", replay: replay_result }
+  else fork(replay_result.state, new_workflow_id, branch_point_seq, reason)
+}
+
+// counterfactual replays a forked state with a modified event sequence.
+fn counterfactual(forked_state, policy_rec, actor_rec, counterfactual_events, tool_version) {
+  let result = replay.replay(forked_state, policy_rec, actor_rec, counterfactual_events, tool_version) in
+  {
+    ok: result.ok,
+    state: result.state,
+    receipts: result.receipts,
+    chain_root: result.chain_root,
+    branch_id: forked_state.workflow_id,
+    parent_id: if rec.has(forked_state, "lineage") then forked_state.lineage.parent_id else null,
+    branch_point_seq: if rec.has(forked_state, "lineage") then forked_state.lineage.branch_point_seq else null
+  }
+}
+
+// logical_snapshot extracts the comparable logical fields from a state —
+// stage, variables, plan, final_decision. Excludes workflow_id, seq,
+// timeline, violations, and lineage which differ structurally between
+// original and forked workflows.
+fn logical_snapshot(s) {
+  {
+    stage: s.stage,
+    variables: s.variables,
+    final_decision: s.final_decision,
+    artifact_count: list.len(s.artifacts),
+    approval_count: list.len(s.approvals)
+  }
+}
+
+// compare_branches compares logical outcome of two replay results.
+// Use logical_converged to test whether the same decisions were reached.
+// Use chain_root fields to confirm cryptographic independence.
+fn compare_branches(original, counterfactual_result) {
+  let orig_snap = logical_snapshot(original.state) in
+  let cf_snap = logical_snapshot(counterfactual_result.state) in
+  let orig_snap_hash = receipt.digest(orig_snap) in
+  let cf_snap_hash = receipt.digest(cf_snap) in
+  {
+    logical_converged: orig_snap_hash == cf_snap_hash,
+    original_stage: original.state.stage,
+    counterfactual_stage: counterfactual_result.state.stage,
+    original_hash: receipt.digest(original.state),
+    counterfactual_hash: receipt.digest(counterfactual_result.state),
+    original_chain: original.chain_root,
+    counterfactual_chain: counterfactual_result.chain_root,
+    chains_independent: original.chain_root != counterfactual_result.chain_root,
+    original_ok: original.ok,
+    counterfactual_ok: counterfactual_result.ok
+  }
+}
+
+fn ancestry(forked_state) {
+  if rec.has(forked_state, "lineage") then
+    { has_parent: true, branch: forked_state.lineage }
+  else
+    { has_parent: false }
+}
+
+export { make_branch, fork, fork_from_replay, counterfactual, compare_branches, ancestry, logical_snapshot }

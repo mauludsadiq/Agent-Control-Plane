@@ -1,0 +1,100 @@
+import("../src/acp/state") as state
+import("../src/acp/policy") as policy
+import("../src/acp/runtime") as runtime
+import("../src/acp/receipt") as receipt
+import("../src/acp/replay") as replay
+import("../src/acp/lineage") as lineage
+import("std/list") as list
+
+test "fork creates independent workflow from parent state" {
+  let p = policy.default_enterprise_policy() in
+  let s0 = state.new_workflow("wf_parent", "parent workflow", "ops") in
+  let a = runtime.actor("operator:1", ["operator"]) in
+  let r1 = runtime.human_state_edit(a, s0, p, [{ path: "stage", value: "research" }]) in
+
+  let forked = lineage.fork(r1.state, "wf_fork_a", r1.state.seq, "test counterfactual") in
+  forked.ok &&
+  forked.state.workflow_id == "wf_fork_a" &&
+  forked.state.stage == "research" &&
+  forked.state.seq == 0 &&
+  forked.branch.parent_id == "wf_parent"
+}
+
+test "fork resets timeline and violations but preserves logical state" {
+  let p = policy.default_enterprise_policy() in
+  let s0 = state.new_workflow("wf_parent", "parent workflow", "ops") in
+  let a = runtime.actor("operator:1", ["operator"]) in
+  let r1 = runtime.human_state_edit(a, s0, p, [
+    { path: "stage", value: "research" },
+    { path: "var.vendors", value: ["a", "b"] }
+  ]) in
+
+  let forked = lineage.fork(r1.state, "wf_fork_b", r1.state.seq, "counterfactual vendor set") in
+  forked.ok &&
+  list.len(forked.state.timeline) == 0 &&
+  list.len(forked.state.violations) == 0 &&
+  forked.state.stage == "research"
+}
+
+test "counterfactual produces different logical outcome from original" {
+  let p = policy.default_enterprise_policy() in
+  let s0 = state.new_workflow("wf_parent", "parent", "ops") in
+  let a = runtime.actor("operator:1", ["operator"]) in
+
+  let r1 = runtime.human_state_edit(a, s0, p, [{ path: "stage", value: "research" }]) in
+  let forked = lineage.fork(r1.state, "wf_fork_c", r1.state.seq, "what if decision") in
+
+  let original_events = [
+    { kind: "human_state_edit", input: { tool: "none", patches: [{ path: "stage", value: "review" }] } }
+  ] in
+  let cf_events = [
+    { kind: "human_state_edit", input: { tool: "none", patches: [{ path: "stage", value: "rejected" }] } }
+  ] in
+
+  let original_replay = replay.replay(r1.state, p, a, original_events, "human") in
+  let cf_result = lineage.counterfactual(forked.state, p, a, cf_events, "human") in
+  let comparison = lineage.compare_branches(original_replay, cf_result) in
+
+  !comparison.logical_converged &&
+  comparison.original_stage == "review" &&
+  comparison.counterfactual_stage == "rejected" &&
+  cf_result.branch_id == "wf_fork_c" &&
+  cf_result.parent_id == "wf_parent"
+}
+
+test "ancestry detects parent lineage" {
+  let p = policy.default_enterprise_policy() in
+  let s0 = state.new_workflow("wf_parent", "parent", "ops") in
+  let a = runtime.actor("operator:1", ["operator"]) in
+  let r1 = runtime.human_state_edit(a, s0, p, [{ path: "stage", value: "research" }]) in
+
+  let forked = lineage.fork(r1.state, "wf_fork_d", r1.state.seq, "audit") in
+  let anc = lineage.ancestry(forked.state) in
+  anc.has_parent && anc.branch.parent_id == "wf_parent"
+}
+
+test "original workflow ancestry returns no parent" {
+  let s0 = state.new_workflow("wf_root", "root", "ops") in
+  let anc = lineage.ancestry(s0) in
+  !anc.has_parent
+}
+
+test "compare_branches detects logical convergence with same events" {
+  let p = policy.default_enterprise_policy() in
+  let s0 = state.new_workflow("wf_parent", "parent", "ops") in
+  let a = runtime.actor("operator:1", ["operator"]) in
+  let r1 = runtime.human_state_edit(a, s0, p, [{ path: "stage", value: "research" }]) in
+
+  let forked = lineage.fork(r1.state, "wf_fork_e", r1.state.seq, "identical replay") in
+
+  let events = [
+    { kind: "human_state_edit", input: { tool: "none", patches: [{ path: "stage", value: "review" }] } }
+  ] in
+
+  let original_replay = replay.replay(r1.state, p, a, events, "human") in
+  let cf_result = lineage.counterfactual(forked.state, p, a, events, "human") in
+  let comparison = lineage.compare_branches(original_replay, cf_result) in
+
+  comparison.logical_converged &&
+  comparison.chains_independent
+}

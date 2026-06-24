@@ -1,0 +1,194 @@
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+import("receipt") as receipt
+import("policy") as policy
+
+// Autonomy levels — agents earn broader permissions through verified performance.
+// Level is derived solely from the receipt chain and artifact shelf: fully replayable.
+//
+// 0  restricted   new or recently violated agent — core tools only, no spend
+// 1  supervised   some history, low confidence — core tools, human approval required
+// 2  standard     solid history — default enterprise tool set
+// 3  extended     strong history — extended tool set, higher spend threshold
+// 4  autonomous   exceptional history — full tool set, highest spend threshold
+
+let LEVEL_RESTRICTED  = 0
+let LEVEL_SUPERVISED  = 1
+let LEVEL_STANDARD    = 2
+let LEVEL_EXTENDED    = 3
+let LEVEL_AUTONOMOUS  = 4
+
+// Minimum receipts before any level above restricted is granted.
+// Protects against cold-start manipulation.
+let MIN_RECEIPTS_SUPERVISED = 3
+let MIN_RECEIPTS_STANDARD   = 10
+let MIN_RECEIPTS_EXTENDED   = 25
+let MIN_RECEIPTS_AUTONOMOUS = 50
+
+// Tool allowlists per autonomy level.
+// Each level is a strict superset of the level below.
+fn allowed_tools_for_level(level) {
+  if level == LEVEL_RESTRICTED then
+    ["none"]
+  else if level == LEVEL_SUPERVISED then
+    ["none", "read_file", "search"]
+  else if level == LEVEL_STANDARD then
+    ["none", "read_file", "search", "write_artifact", "score_vendor", "diff_contract"]
+  else if level == LEVEL_EXTENDED then
+    ["none", "read_file", "search", "write_artifact", "score_vendor", "diff_contract", "run_tests", "run_query", "write_file"]
+  else
+    ["none", "read_file", "search", "write_artifact", "score_vendor", "diff_contract", "run_tests", "run_query", "write_file", "external_api", "send_notification"]
+}
+
+// Spend limits per autonomy level.
+fn spend_limit_for_level(level) {
+  if level == LEVEL_RESTRICTED then 0
+  else if level == LEVEL_SUPERVISED then 100
+  else if level == LEVEL_STANDARD then 5000
+  else if level == LEVEL_EXTENDED then 25000
+  else 100000
+}
+
+// score computes an autonomy record for an actor from receipts and artifacts.
+// receipts: all receipts for this workflow (filter by actor internally)
+// artifacts: all artifacts committed by this actor
+// human_edits: count of human_state_edit transitions that followed an agent transition
+//   (proxy for human intervention rate — caller computes from timeline)
+fn score(actor_id, receipts, artifacts, human_edits) {
+  let actor_receipts = list.filter(receipts, fn(r) { r.actor == actor_id }) in
+  let total = list.len(actor_receipts) in
+  let violations = list.filter(actor_receipts, fn(r) { r.kind == "policy_violation" }) in
+  let violation_count = list.len(violations) in
+  let committed = list.filter(actor_receipts, fn(r) { r.kind != "policy_violation" }) in
+  let committed_count = list.len(committed) in
+  let policy_pass_rate = if total == 0 then 0
+    else (committed_count * 100) / total in
+  let avg_confidence = if list.len(artifacts) == 0 then 0
+    else list.fold(artifacts, 0, fn(acc, a) { acc + a.confidence }) / list.len(artifacts) in
+  let intervention_rate = if committed_count == 0 then 100
+    else (human_edits * 100) / committed_count in
+
+  // Derive level from evidence
+  let level =
+    if violation_count > 2 then LEVEL_RESTRICTED
+    else if total < MIN_RECEIPTS_SUPERVISED then LEVEL_RESTRICTED
+    else if total < MIN_RECEIPTS_STANDARD then
+      if policy_pass_rate >= 90 && avg_confidence >= 70 then LEVEL_SUPERVISED
+      else LEVEL_RESTRICTED
+    else if total < MIN_RECEIPTS_EXTENDED then
+      if policy_pass_rate >= 95 && avg_confidence >= 75 && intervention_rate <= 30 then LEVEL_STANDARD
+      else if policy_pass_rate >= 90 then LEVEL_SUPERVISED
+      else LEVEL_RESTRICTED
+    else if total < MIN_RECEIPTS_AUTONOMOUS then
+      if policy_pass_rate >= 97 && avg_confidence >= 80 && intervention_rate <= 20 then LEVEL_EXTENDED
+      else if policy_pass_rate >= 95 then LEVEL_STANDARD
+      else LEVEL_SUPERVISED
+    else
+      if policy_pass_rate >= 99 && avg_confidence >= 85 && intervention_rate <= 10 then LEVEL_AUTONOMOUS
+      else if policy_pass_rate >= 97 then LEVEL_EXTENDED
+      else LEVEL_STANDARD
+  in
+
+  {
+    autonomy_type: "acp.autonomy.v1",
+    actor_id: actor_id,
+    level: level,
+    total_receipts: total,
+    violation_count: violation_count,
+    policy_pass_rate: policy_pass_rate,
+    avg_confidence: avg_confidence,
+    intervention_rate: intervention_rate,
+    allowed_tools: allowed_tools_for_level(level),
+    spend_limit: spend_limit_for_level(level),
+    evidence_digest: receipt.digest({ actor_id: actor_id, total: total, violations: violation_count, pass_rate: policy_pass_rate, confidence: avg_confidence })
+  }
+}
+
+// override applies a human-governed autonomy cap or elevation.
+// The override is stored in var.autonomy.<actor_id> via a governed patch.
+// Cap: if override.max_level < computed level, level is reduced.
+// Floor: if override.min_level > computed level, level is elevated.
+// Both are bounds — the evidence score remains authoritative between them.
+fn override_level(autonomy_record, state) {
+  let key = str.concat(["autonomy.", autonomy_record.actor_id]) in
+  if !rec.has(state.variables, key) then autonomy_record
+  else
+    let o = rec.get(state.variables, key) in
+    let capped = if rec.has(o, "max_level") && autonomy_record.level > o.max_level
+      then o.max_level else autonomy_record.level in
+    let floored = if rec.has(o, "min_level") && capped < o.min_level
+      then o.min_level else capped in
+    let final_level = if floored > LEVEL_AUTONOMOUS then LEVEL_AUTONOMOUS
+      else if floored < LEVEL_RESTRICTED then LEVEL_RESTRICTED
+      else floored in
+    {
+      ...autonomy_record,
+      level: final_level,
+      allowed_tools: allowed_tools_for_level(final_level),
+      spend_limit: spend_limit_for_level(final_level),
+      override_applied: true,
+      override: o
+    }
+}
+
+// evaluate_with_autonomy wraps policy.evaluate with autonomy-expanded constraints.
+// The autonomy record replaces the static tool allowlist and spend limit for this actor.
+// All other policy rules (data_boundary, required_role) still apply unchanged.
+fn evaluate_with_autonomy(pol, state, actor_rec, input, autonomy_record) {
+  let autonomy_rule = {
+    id: str.concat(["autonomy.tool.allow.", autonomy_record.actor_id]),
+    kind: "tool_allow",
+    severity: "high",
+    allowed_tools: autonomy_record.allowed_tools
+  } in
+  let spend_rule = {
+    id: str.concat(["autonomy.spend.", autonomy_record.actor_id]),
+    kind: "spend_limit",
+    severity: "medium",
+    max_amount: autonomy_record.spend_limit,
+    approval_kind: "manager_spend"
+  } in
+  // Build an augmented policy: base rules filtered to remove static tool_allow
+  // and spend_limit, replaced by autonomy-derived equivalents.
+  let base_rules = list.filter(pol.rules, fn(r) {
+    r.kind != "tool_allow" && r.kind != "spend_limit"
+  }) in
+  let augmented_policy = {
+    version: str.concat([pol.version, "+autonomy.", autonomy_record.actor_id, ".l", str.from(autonomy_record.level)]),
+    rules: list.concat([base_rules, [autonomy_rule, spend_rule]])
+  } in
+  let result = policy.evaluate(augmented_policy, state, actor_rec, input) in
+  { ...result, autonomy: autonomy_record }
+}
+
+// level_name returns a human-readable label for a level int.
+fn level_name(level) {
+  if level == LEVEL_RESTRICTED then "restricted"
+  else if level == LEVEL_SUPERVISED then "supervised"
+  else if level == LEVEL_STANDARD then "standard"
+  else if level == LEVEL_EXTENDED then "extended"
+  else "autonomous"
+}
+
+// summary returns a concise human-readable autonomy card.
+fn summary(autonomy_record) {
+  {
+    actor_id: autonomy_record.actor_id,
+    level: autonomy_record.level,
+    level_name: level_name(autonomy_record.level),
+    policy_pass_rate: autonomy_record.policy_pass_rate,
+    avg_confidence: autonomy_record.avg_confidence,
+    intervention_rate: autonomy_record.intervention_rate,
+    total_receipts: autonomy_record.total_receipts,
+    violation_count: autonomy_record.violation_count,
+    spend_limit: autonomy_record.spend_limit,
+    tool_count: list.len(autonomy_record.allowed_tools)
+  }
+}
+
+export {
+  score, override_level, evaluate_with_autonomy, summary,
+  allowed_tools_for_level, spend_limit_for_level, level_name,
+  LEVEL_RESTRICTED, LEVEL_SUPERVISED, LEVEL_STANDARD, LEVEL_EXTENDED, LEVEL_AUTONOMOUS
+}
