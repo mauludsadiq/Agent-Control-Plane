@@ -4,17 +4,48 @@
 
 Agent Control Plane is not sold as agent infrastructure. It is sold as operational control over AI work.
 
-The dominant signal:
-
 > Companies do not need more chat windows. They need a cockpit where AI work can be inspected, steered, approved, replayed, and proven.
 
-This repository implements that cockpit substrate in FARD. The user-facing product is simple: plan graph, artifact shelf, policy rails, timeline, state editor, replay. The machinery underneath is typed workflow state, policy-enforced transitions, artifact provenance, cryptographic receipts, deterministic replay, incremental state storage, workflow branching, and async policy gates.
+This repository implements that cockpit in FARD. The machinery is typed workflow state, policy-enforced transitions, artifact provenance, cryptographic receipts, deterministic replay, delta storage, workflow branching, async policy gates, staged autonomy, external chain anchoring, framework interoperability, multi-framework merging, and compliance reporting.
+
+---
+
+## Repository at a glance
+
+    src/acp/          19 modules   2,145 lines
+    tests/            15 files      152 tests    0 failures
+    sdk/openapi/      acp.openapi.json v2.0.0   15 endpoints   30 schemas
+
+    fardrun test --program tests/test_<module>.fard --json
+
+All 152 tests pass against fardrun v1.7.1.
+
+---
+
+## Module index
+
+    receipt.fard          Canonical JSON, SHA-256 digests, linked receipt chain
+    policy.fard           Executable policy rules, scoping, composition
+    state.fard            Workflow state schema, patch paths
+    artifact.fard         Artifact provenance, digest-based diffs
+    plan.fard             Plan graph, blockers, ready nodes, risk hotspots
+    timeline.fard         Digested multi-agent execution timeline
+    runtime.fard          Policy-gated transition executor, dashboard projection
+    replay.fard           Deterministic replay, chain verification, comparison
+    control_plane.fard    Store-backed workflow lifecycle
+    delta.fard            Incremental state storage, reconstruction, chain verify
+    lineage.fard          Workflow branching, counterfactual replay
+    gate.fard             Async policy gates, token-based resumption
+    autonomy.fard         Staged autonomy scoring, tool expansion, human override
+    anchor.fard           External chain anchoring, proof verification, gap report
+    interop.fard          LangGraph / CrewAI / Temporal / BPMN ingest and export
+    compliance.fard       9-section audit report, tamper-evident evidence digest
+    merge.fard            Multi-framework workflow merging, conflict detection
+    sample_workflows.fard Vendor selection end-to-end demo
 
 ---
 
 ## What is being sold
-
-### The buyer-facing promise
 
 Agent Control Plane lets an organization answer six operational questions:
 
@@ -22,7 +53,7 @@ Agent Control Plane lets an organization answer six operational questions:
    The Plan Graph shows task decomposition, dependencies, assigned agents, and risk hotspots.
 
 2. **What did it produce?**
-   The Artifact Shelf turns outputs into first-class, versioned objects with provenance and confidence.
+   The Artifact Shelf turns outputs into first-class objects with provenance, confidence, and tool trace.
 
 3. **What is it allowed to do?**
    Policy Rails enforce rules as executable constraints, not prompt instructions.
@@ -31,241 +62,321 @@ Agent Control Plane lets an organization answer six operational questions:
    The Timeline records agent handoffs, tool calls, human edits, policy violations, and state commits.
 
 5. **How can a human steer it without prompt gymnastics?**
-   The State Editor applies validated state patches and commits them as receipted transitions.
+   The State Editor applies validated patches committed as receipted transitions.
 
 6. **Can the decision be replayed and audited?**
    Replay re-executes from checkpoints and compares state hashes and receipt chains.
 
-### The infrastructure promise
-
-Every material action is a typed, policy-checked, receipted state transition:
-
-    state_before + input + actor + policy + tool_version
-            -> policy evaluation
-            -> state_after
-            -> receipt digest
-            -> timeline event
-            -> replayable checkpoint
-
-The buyer sees Verified, Replay Available, Policy Compliant, and Audit Receipt Available.
-
-The system maintains the hard proof behind those labels.
-
 ---
 
-## Repository contents
+## Specs
 
-    src/acp/
-      receipt.fard          canonical JSON, SHA-256 digests, linked receipt chain, chain verification
-      policy.fard           executable policy rails, violation cards, rule scoping, policy composition
-      state.fard            canonical workflow state, patch paths, var. prefix convention
-      artifact.fard         artifact shelf records, cards, digest-based diffs, provenance
-      plan.fard             plan graph, blockers, ready nodes, risk hotspots
-      timeline.fard         readable multi-agent execution timeline
-      runtime.fard          policy-gated transition executor and dashboard projection
-      replay.fard           deterministic replay, chain verification, replay comparison
-      control_plane.fard    store-backed workflow lifecycle, artifact commit, dashboard, replay
-      delta.fard            incremental state storage, delta chain verification, reconstruction
-      lineage.fard          workflow branching, counterfactual replay, branch comparison
-      gate.fard             async policy gates, token-based resumption, expiry
-      sample_workflows.fard vendor-selection workflow demo
+### Workflow state schema
 
-    tests/
-      test_policy.fard        9 tests
-      test_receipt.fard       2 tests
-      test_plan.fard          2 tests
-      test_runtime.fard       2 tests
-      test_replay.fard        4 tests
-      test_control_plane.fard 5 tests
-      test_delta.fard         6 tests
-      test_lineage.fard       6 tests
-      test_gate.fard          7 tests
-
-    examples/
-      vendor_selection.fard
-
-    sdk/openapi/
-      acp.openapi.json
-
-    docs/
-      ARCHITECTURE.md
-
-Total: 1,552 lines across 23 files. 43 tests, zero failures.
-
----
-
-## Core model
-
-### Workflow state
-
-A workflow state is the canonical object of the system:
+Every workflow is a single canonical record. Schema version is pinned in every receipt.
 
     {
-      "schema": "acp.workflow_state.v1",
-      "workflow_id": "wf_vendor_001",
-      "goal": "Select a vendor with auditable approval and replay",
-      "stage": "research",
-      "seq": 3,
-      "plan": { "nodes": [], "edges": [] },
-      "artifacts": [],
-      "approvals": [],
-      "violations": [],
-      "timeline": [],
-      "variables": {},
+      "schema":         "acp.workflow_state.v1",
+      "workflow_id":    "wf_vendor_001",
+      "goal":           "Select a vendor with auditable approval and replay",
+      "owner":          "ops",
+      "stage":          "research",
+      "seq":            4,
+      "plan":           { "nodes": [], "edges": [] },
+      "artifacts":      [],        // sha256: digest refs
+      "approvals":      [],
+      "violations":     [],
+      "timeline":       [],
+      "variables":      {},
       "final_decision": null
     }
 
-Humans steer workflows by editing this state through patches. Agents do work by proposing artifacts and state patches. The runtime is the only component allowed to commit transitions.
+Patch paths (used in state.apply_patches):
 
-### Patch paths
-
-State patches use explicit paths. Unknown paths surface as patch_error — no silent corruption.
-
-    "stage"              workflow stage string
-    "goal"               workflow goal string
-    "owner"              workflow owner string
+    "stage"              string
+    "goal"               string
+    "owner"              string
     "plan"               full plan graph replacement
-    "variables"          full variables record replacement
-    "final_decision"     final decision record
-    "approvals"          appends one approval record (governed audit trail)
-    "var.<key>"          sets a single key inside variables
+    "variables"          full variables replacement
+    "final_decision"     any value
+    "approvals"          appends one approval record
+    "var.<key>"          sets one key inside variables
 
-### Policy rails
+Unknown paths surface as patch_error — never silently corrupt state.
 
-Policies are machine-readable rules. They are not prompts.
+### Receipt schema
 
-Implemented rule kinds:
-
-    tool_allow       block unauthorized tools
-    required_role    require actor role — scopeable to specific tools via applies_to
-    spend_limit      require approval above a threshold
-    data_boundary    block sensitive data to forbidden destinations
-
-A failed policy check produces a violation card:
+Every committed transition emits a receipt. The receipt chain is a linked hash from genesis —
+insertion or reordering of any receipt produces a different chain root.
 
     {
-      "ok": false,
-      "code": "POLICY_DATA_BOUNDARY",
-      "message": "Data boundary violation",
-      "rule_id": "data.no_pii_public",
-      "severity": "critical",
-      "data": { "classification": "pii", "destination": "public_model" }
+      "receipt_type":       "acp.state_transition.v1",
+      "workflow_id":        "wf_vendor_001",
+      "seq":                4,
+      "kind":               "human_state_edit",
+      "actor":              "manager:ops",
+      "state_before_hash":  "sha256:...",
+      "input_hash":         "sha256:...",
+      "policy_version":     "ACP-POLICY-1.0.0",
+      "policy_digest":      "sha256:...",
+      "tool_version":       "human",
+      "tool_digest":        "sha256:...",
+      "artifact_digests":   [],
+      "state_after_hash":   "sha256:...",
+      "digest":             "sha256:..."
+    }
+
+Verification: receipt.verify_state_receipt(receipt, state_before, input, state_after)
+checks state_before_hash, input_hash, state_after_hash, and body digest.
+
+Chain root: receipt.chain_root(receipts) — linked hash, not a flat hash.
+Chain verify: receipt.verify_chain(receipts, expected_root)
+
+### Artifact schema
+
+    {
+      "artifact_type":      "acp.artifact.v1",
+      "kind":               "summary",
+      "name":               "vendor_evidence.md",
+      "media_type":         "text/markdown",
+      "content":            "...",
+      "producer":           "research_agent",
+      "input_state_hash":   "sha256:...",
+      "tool_trace":         [{ "tool": "search", "ok": true }],
+      "confidence":         91,
+      "digest":             "sha256:..."
+    }
+
+Content comparison uses digest equality — type-safe for text, records, lists, or bytes.
+
+### Policy rule schema
+
+    {
+      "id":            "tool.allow.core",
+      "kind":          "tool_allow",      // tool_allow | required_role | spend_limit | data_boundary
+      "severity":      "high",            // low | medium | high | critical
+      "allowed_tools": [...],             // tool_allow
+      "role":          "operator",        // required_role
+      "applies_to":    ["none"],          // required_role — scope to specific tools
+      "max_amount":    5000,              // spend_limit
+      "approval_kind": "manager_spend",   // spend_limit
+      "block":         [...]              // data_boundary
+    }
+
+Violation card:
+
+    {
+      "ok":        false,
+      "code":      "POLICY_TOOL_DENIED",
+      "message":   "Tool not allowed: external_email",
+      "rule_id":   "tool.allow.core",
+      "severity":  "high",
+      "data":      { "tool": "external_email", "allowed_tools": [...] }
     }
 
 Policy composition:
 
-    policy.merge_policies(base, overlay)          combine two policies, rules appended
-    policy.scope_rule(rule, applies_to)           limit a rule to specific tools
-    policy.extend_tool_allowlist(policy, id, tools)  add tools without replacing base rule
+    policy.merge_policies(base, overlay)
+    policy.scope_rule(rule, applies_to)
+    policy.extend_tool_allowlist(policy, rule_id, extra_tools)
 
-### Receipts
+### Delta schema
 
-Every committed transition emits a state receipt:
-
-    {
-      "receipt_type": "acp.state_transition.v1",
-      "workflow_id": "wf_vendor_001",
-      "seq": 4,
-      "kind": "human_state_edit",
-      "actor": "manager:ops",
-      "state_before_hash": "sha256:...",
-      "input_hash": "sha256:...",
-      "policy_version": "ACP-POLICY-1.0.0",
-      "policy_digest": "sha256:...",
-      "tool_version": "human",
-      "tool_digest": "sha256:...",
-      "artifact_digests": [],
-      "state_after_hash": "sha256:...",
-      "digest": "sha256:..."
-    }
-
-Receipt verification checks state_before_hash, input_hash, state_after_hash, and body digest.
-The receipt chain is a linked hash chain from genesis — insertion or reordering of any receipt
-breaks the root. Use receipt.verify_chain(receipts, chain_root) to confirm integrity.
-
-### Artifacts
-
-Artifacts are first-class objects, not buried chat messages.
-
-An artifact records kind, name, media_type, content, producer, input_state_hash, tool_trace,
-confidence, and digest. Content comparison uses digest equality — type-safe for any content type.
-
-### Timeline
-
-Timeline events are business-readable:
-
-    handoff
-    tool_call
-    human_state_edit
-    policy_violation
-    state_transition
-
-Each event has its own digest. timeline.visible() strips internal data for UI projection
-without affecting the stored events used for verification.
-
-### Replay
-
-Replay takes initial_state, policy, actor, events, and tool_version and returns final_state,
-receipts, and chain_root. On policy violation, the fold halts cleanly — the violation receipt
-is not appended to the chain.
-
-replay.compare_replay(a, b) returns:
+Deltas store patch sets instead of full state blobs. Storage cost is O(patches) not O(state).
 
     {
-      "equal": bool,         both ok, same state hash, same chain root
-      "both_ok": bool,
-      "same_state": bool,
-      "same_chain": bool,
-      "a_ok": bool,
-      "b_ok": bool,
-      "a_hash": "sha256:...",
-      "b_hash": "sha256:...",
-      "a_chain_root": "sha256:...",
-      "b_chain_root": "sha256:..."
+      "delta_type":         "acp.delta.v1",
+      "seq":                3,
+      "kind":               "human_state_edit",
+      "actor":              "operator:1",
+      "patches":            [{ "path": "stage", "value": "review" }],
+      "artifact_digests":   [],
+      "state_before_hash":  "sha256:...",
+      "state_after_hash":   "sha256:...",
+      "receipt_digest":     "sha256:..."
     }
 
-### Delta storage
+Baseline (seq 0) stored as full state. All subsequent seqs stored as deltas.
+Reconstruction: delta.reconstruct_at(baseline, deltas, target_seq)
+Chain verify: delta.verify_delta_chain(baseline_hash, deltas)
 
-Deltas record patch sets instead of full state blobs. Storage cost is O(patches) not O(state_size).
-The baseline (seq: 0) is stored as a full state; all subsequent seqs are stored as deltas.
+### Gate schema
 
-    delta.from_transition(result, patches, kind, actor_id)
-    delta.apply_deltas(baseline, deltas, max_seq)     pass -1 for all
-    delta.reconstruct_at(baseline, deltas, target_seq)
-    delta.verify_delta_chain(baseline_hash, deltas)
-    delta.summarize(deltas)                           compact audit log, no patch payloads
-    delta.storage_report(deltas)
+    {
+      "gate_type":     "acp.gate.v1",
+      "token":         "sha256:...",       // deterministic — present to resume
+      "kind":          "manager_spend",
+      "input":         { ... },            // original transition, re-evaluated on resume
+      "actor_id":      "operator:1",
+      "deadline_seq":  15,                 // seq-based expiry for deterministic replay
+      "context":       { "amount": 9000 },
+      "status":        "pending",
+      "digest":        "sha256:..."
+    }
 
-Reconstructed states reflect logical fields (stage, variables, plan, artifacts, approvals).
-Timeline events are runtime-only and are not reconstructed from deltas.
-
-### Workflow branching
-
-Lineage supports counterfactual replay without overwriting the original audit trail.
-
-    lineage.fork(parent_state, new_workflow_id, branch_point_seq, reason)
-    lineage.fork_from_replay(initial_state, policy, actor, events, tool_version, branch_point_seq, new_id, reason)
-    lineage.counterfactual(forked_state, policy, actor, events, tool_version)
-    lineage.compare_branches(original, counterfactual_result)
-    lineage.ancestry(state)
-
-fork resets timeline and violations. Logical state (stage, variables, plan, artifacts, approvals)
-is inherited. compare_branches uses logical_converged for outcome comparison and chains_independent
-to confirm cryptographic separation.
-
-### Async policy gates
-
-Gates suspend a workflow pending external resolution without blocking the runtime.
-
+Gate lifecycle:
     gate.open(actor, state, policy, input, gate_kind, deadline_seq, context)
-    gate.resume(actor, gated_state, policy, tool_version, token, resolution)
-    gate.pending_gate(state)
-    gate.is_expired(gate, current_seq)
+      -> stage: "gated", token issued, original transition NOT committed
 
-open transitions stage to "gated" and stores the gate in var.gate with a deterministic token.
-resume validates the token, adds the approval to state, re-evaluates policy (no bypass),
-and commits the original transition if policy now passes. resolution is "approved" or "rejected".
-Expiry is seq-based for deterministic replay.
+    gate.resume(actor, gated_state, policy, tool_version, token, "approved"|"rejected")
+      -> policy re-evaluated with approval added — no bypass
+      -> on approval: original patches committed
+      -> on rejection: stage: "gated_rejected"
+
+### Autonomy levels
+
+Agents earn broader permissions through verified receipt chain evidence.
+
+    Level 0  restricted    no history or violations     tools: [none]
+    Level 1  supervised    3+ receipts, 90% pass rate   tools: [none, read_file, search]
+    Level 2  standard      10+ receipts, 95% pass rate  tools: + write_artifact, score_vendor, diff_contract
+    Level 3  extended      25+ receipts, 97% pass rate  tools: + run_tests, run_query, write_file
+    Level 4  autonomous    50+ receipts, 99% pass rate  tools: + external_api, send_notification
+
+Spend limits: 0 / 100 / 5,000 / 25,000 / 100,000
+
+Evidence inputs: policy_pass_rate, avg_confidence, intervention_rate, violation_count.
+Cold-start protection: minimum receipt counts enforced before any level above restricted.
+Human override: var.autonomy.<actor_id> = { max_level: N } or { min_level: N }
+
+### Anchor schema
+
+    Payload:
+    {
+      "anchor_type":    "acp.anchor.v1",
+      "workflow_id":    "wf_vendor_001",
+      "seq_from":       1,
+      "seq_to":         8,
+      "chain_root":     "sha256:...",
+      "policy_version": "ACP-POLICY-1.0.0",
+      "payload_digest": "sha256:..."
+    }
+
+    Proof:
+    {
+      "proof_type":   "acp.anchor_proof.v1",
+      "payload":      { ... },
+      "external_ref": {
+        "kind":       "ethereum",        // ethereum | rfc3161 | ct_log
+        "tx_hash":    "0x...",
+        "block":      12345,
+        "network":    "mainnet"
+      },
+      "anchored_by":  "anchor-service:1",
+      "proof_digest": "sha256:..."
+    }
+
+Any third party with the receipt list can recompute chain_root and verify the payload
+without trusting the ACP operator or the anchoring backend.
+
+### Compliance report schema
+
+    {
+      "report_type":        "acp.compliance_report.v1",
+      "verdict":            "compliant",    // compliant | warnings | non_compliant
+      "reasons":            [],             // non-empty if non_compliant
+      "warnings":           [],             // non-empty if warnings
+      "identity":           { workflow_id, goal, owner, stage, seq, policy_version, state_hash },
+      "policy_coverage":    { rule_count, violation_count, critical_count, high_count, clean },
+      "chain_integrity":    { receipt_count, chain_root, chain_verified, tamper_evident },
+      "anchor_status":      { proof_count, fully_anchored, gap_count, gaps },
+      "storage":            { delta_count, total_patch_ops, baseline_plus_deltas },
+      "autonomy_roster":    { actor_count, restricted_count, actors },
+      "violations":         { total, by_severity: { critical, high, medium, low } },
+      "artifact_provenance":{ artifact_count, avg_confidence, low_confidence_count },
+      "evidence_digest":    "sha256:..."
+    }
+
+Verdict is derived from evidence — not asserted. Tampered reports fail verification.
+compliance.verify(report) recomputes evidence_digest and compares.
+
+### Interop trace format
+
+Frameworks emit traces. ACP ingests them into plan graph + timeline + artifact shelf.
+
+    LangGraph run:
+    {
+      "run_id":  "lg_run_001",
+      "nodes":   [{ "id", "name", "agent", "status", "metadata": { "risk", "output_schema" } }],
+      "edges":   [{ "source", "target", "condition" }],
+      "events":  [{ "type": "tool_call"|"node_complete"|"handoff", "node_id", "output", "tool" }]
+    }
+
+    CrewAI run:
+    {
+      "crew_id": "crew_001",
+      "tasks":   [{ "id", "description", "agent_id", "status", "expected_output" }],
+      "events":  [{ "type": "task_complete"|"tool_use"|"agent_handoff", "agent_id", "output" }]
+    }
+
+    Temporal run:
+    {
+      "run_id":      "temporal_run_001",
+      "workflow":    { "workflow_id", "workflow_type", "status" },
+      "activities":  [{ "activity_id", "activity_type", "worker_id", "status" }],
+      "events":      [{ "type": "ActivityTaskCompleted"|"ActivityTaskScheduled"|"ActivityTaskFailed", "worker_id", "output" }]
+    }
+
+    BPMN / Camunda run:
+    {
+      "process_instance":   { "id", "process_definition_key", "business_key", "state" },
+      "activity_instances": [{ "activity_id", "activity_name", "activity_type", "assignee", "state" }],
+      "sequence_flows":     [{ "source_ref", "target_ref", "name" }],
+      "history_events":     [{ "type": "activityStarted"|"activityCompleted"|"variableCreated"|"incidentCreated", "activity_id", "assignee", "variables", "output" }]
+    }
+
+BPMN gateway types (ExclusiveGateway, ParallelGateway, InclusiveGateway) are filtered
+to edges — not materialized as plan nodes.
+BPMN variable events are extracted as ACP var. patches.
+BPMN incidents map to policy_violation timeline events.
+
+Output events from all frameworks are materialized as ACP artifacts with provenance.
+
+### Multi-framework merge
+
+    merge.merge(ingested_results, cross_edges, workflow_id)
+
+Produces one plan graph, one timeline, one artifact shelf, one provenance chain root
+across any combination of LangGraph, CrewAI, Temporal, and BPMN runs.
+
+Conflict detection: duplicate node ids across frameworks surface as conflicts.
+Resolution: conflicting node ids are prefixed with framework name (langgraph.research,
+crewai.research) — never silently overwritten.
+
+Cross-framework edges:
+    merge.cross_edge("langgraph.research", "crewai.legal_review", "evidence feeds legal")
+
+Framework subgraph extraction:
+    merge.framework_subgraph(merged, "langgraph")
+
+### Agent worker contract
+
+Input (from ACP to agent):
+
+    {
+      "task_id":               "task_123",
+      "workflow_id":           "wf_vendor_001",
+      "state_hash":            "sha256:...",
+      "allowed_tools":         ["search", "write_artifact"],
+      "policy_context":        {},
+      "artifact_inputs":       [],
+      "expected_output_schema":"scorecard"
+    }
+
+Output (from agent to ACP):
+
+    {
+      "task_id":    "task_123",
+      "workflow_id":"wf_vendor_001",
+      "artifact":   { ... },
+      "claims":     [],
+      "confidence": 91,
+      "tool_trace": [{ "tool": "search", "ok": true }],
+      "state_patch":[{ "path": "var.score", "value": 87 }]
+    }
+
+The runtime, not the agent, decides whether this return value may be committed.
+Policy is evaluated against current state at commit time — not at submission time.
 
 ---
 
@@ -287,8 +398,14 @@ Run the full test suite:
     fardrun test --program tests/test_delta.fard --json
     fardrun test --program tests/test_lineage.fard --json
     fardrun test --program tests/test_gate.fard --json
+    fardrun test --program tests/test_autonomy.fard --json
+    fardrun test --program tests/test_anchor.fard --json
+    fardrun test --program tests/test_interop.fard --json
+    fardrun test --program tests/test_compliance.fard --json
+    fardrun test --program tests/test_merge.fard --json
+    fardrun test --program tests/test_bpmn.fard --json
 
-Expected: 43 passed, 0 failed.
+Expected: 152 passed, 0 failed.
 
 ---
 
@@ -300,6 +417,8 @@ Expected: 43 passed, 0 failed.
     plan.ready_nodes(g)
     plan.risk_hotspots(g)
     plan.mark_node(g, id, status)
+    plan.children(g, id)
+    plan.blockers(g, id)
 
 ### Artifact Shelf
 
@@ -369,6 +488,60 @@ Expected: 43 passed, 0 failed.
     gate.pending_gate(state)
     gate.is_expired(gate, current_seq)
 
+### Staged Autonomy
+
+    autonomy.score(actor_id, receipts, artifacts, human_edits)
+    autonomy.override_level(autonomy_record, state)
+    autonomy.evaluate_with_autonomy(policy, state, actor, input, autonomy_record)
+    autonomy.summary(autonomy_record)
+    autonomy.allowed_tools_for_level(level)
+    autonomy.spend_limit_for_level(level)
+
+### External Chain Anchoring
+
+    anchor.make_payload(workflow_id, seq_from, seq_to, chain_root, policy_version)
+    anchor.make_proof(payload, external_ref, anchored_by)
+    anchor.verify_payload(payload, receipts)
+    anchor.verify_proof(proof, receipts)
+    anchor.new_log()
+    anchor.append_proof(log, proof)
+    anchor.gap_report(log, max_seq)
+    anchor.summary(log, max_seq)
+    anchor.is_anchored(log, seq)
+
+### Framework Interop
+
+    interop.ingest(framework, run)           // "langgraph" | "crewai" | "temporal" | "bpmn"
+    interop.export_to(framework, state)
+    interop.langgraph_ingest(run)
+    interop.crewai_ingest(run)
+    interop.temporal_ingest(run)
+    interop.bpmn_ingest(run)
+    interop.extract_artifacts(framework, run_id, events, input_state_hash)
+    interop.bpmn_extract_variable_patches(history_events)
+
+### Multi-Framework Merge
+
+    merge.merge(ingested_results, cross_edges, workflow_id)
+    merge.cross_edge(from_node, to_node, reason)
+    merge.framework_subgraph(merged, framework)
+    merge.find_node_conflicts(ingested_results)
+    merge.summary(merged)
+
+### Compliance Report
+
+    compliance.generate(workflow_state, receipts, artifacts, deltas, anchor_log, autonomy_records, policy)
+    compliance.verify(report)
+    compliance.section_identity(state, policy)
+    compliance.section_policy_coverage(state, receipts, policy)
+    compliance.section_chain_integrity(receipts)
+    compliance.section_anchor_status(anchor_log, max_seq)
+    compliance.section_storage(deltas)
+    compliance.section_autonomy_roster(autonomy_records)
+    compliance.section_violations(state)
+    compliance.section_artifact_provenance(artifacts)
+    compliance.derive_verdict(policy_sec, chain_sec, anchor_sec, violation_sec, artifact_sec)
+
 ### Dashboard Projection
 
     runtime.dashboard(state, artifacts)
@@ -376,16 +549,16 @@ Expected: 43 passed, 0 failed.
 Returns:
 
     {
-      "workflow_id": "wf_vendor_001",
-      "goal": "...",
-      "stage": "research",
-      "seq": 4,
-      "plan_graph": {},
-      "artifact_shelf": [],
-      "timeline": [],
+      "workflow_id":       "wf_vendor_001",
+      "goal":              "...",
+      "stage":             "research",
+      "seq":               4,
+      "plan_graph":        {},
+      "artifact_shelf":    [],
+      "timeline":          [],
       "policy_violations": [],
-      "state_hash": "sha256:...",
-      "replay_available": true
+      "state_hash":        "sha256:...",
+      "replay_available":  true
     }
 
 ---
@@ -410,6 +583,15 @@ Agent Control Plane can fork at any checkpoint and replay with different decisio
 A chat wrapper blocks on slow approvals.
 Agent Control Plane gates the transition, releases the runtime, and resumes on callback.
 
+A chat wrapper cannot prove its history to a regulator.
+Agent Control Plane produces a tamper-evident compliance report with an evidence digest.
+
+A chat wrapper treats every agent the same.
+Agent Control Plane expands agent permissions based on verified historical performance.
+
+A chat wrapper is opaque to existing process infrastructure.
+Agent Control Plane ingests and exports LangGraph, CrewAI, Temporal, and BPMN traces.
+
 ---
 
 ## Deployment shape
@@ -425,6 +607,11 @@ A production deployment maps directly onto these modules:
     timeline-service        timeline projection
     replay-service          replay, comparison, branching, counterfactuals
     gate-service            async gate open, token validation, resumption callbacks
+    autonomy-service        autonomy scoring, override, policy augmentation
+    anchor-service          payload generation, proof storage, gap reporting
+    interop-service         framework trace ingestion and export
+    merge-service           multi-framework workflow assembly
+    compliance-service      report generation and verification
     tool-gateway            governed external tool invocation
     agent-worker-pool       specialized agents that propose patches and artifacts
 
@@ -436,13 +623,14 @@ Recommended backing services:
     OpenTelemetry            infrastructure traces
     OPA/Cedar/custom FARD    enterprise policy rules
     KMS/Vault                keys, secrets, and gate token signing
+    Ethereum/RFC3161/CT log  external chain anchoring backends
     Anka/EOS                 claims, witnesses, challenges, mesh publication
 
 ---
 
 ## Selling line
 
-> Agent Control Plane turns AI work from opaque chat into governed operations: every plan visible, every artifact tracked, every policy enforced, every state editable, every decision replayable, every branch auditable, every approval gateable.
+> Agent Control Plane turns AI work from opaque chat into governed operations: every plan visible, every artifact tracked, every policy enforced, every state editable, every decision replayable, every branch auditable, every approval gateable, every agent calibrated, every chain anchored, every framework connected, every compliance question answerable.
 
 The infrastructure is not the sales pitch.
 
