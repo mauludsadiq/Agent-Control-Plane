@@ -1,0 +1,18 @@
+import("std/env") as env
+import("std/io") as io
+import("std/json") as json
+import("std/list") as list
+import("../../../src/acp/receipt") as receipt
+
+let input = json.decode(io.read_file(env.get("ACP_INPUT_FILE").some).ok)
+
+// receipts is a list of receipt JSON strings from the store
+let receipts = list.map(input.receipts, fn(r) {
+  if r == null then ({ })
+  else json.decode(r.receipt_json)
+})
+
+let root = receipt.chain_root(receipts)
+let verified = receipt.verify_chain(receipts, root)
+
+{ chain_root: root, chain_verified: verified, receipt_count: list.len(receipts) }

@@ -1,24 +1,39 @@
 import("std/env") as env
 import("std/io") as io
 import("std/json") as json
-import("std/list") as list
 import("std/rec") as rec
 import("../../../src/acp/state") as state
 import("../../../src/acp/policy") as policy
 import("../../../src/acp/runtime") as runtime
+import("../../../src/acp/artifact") as artifact
 import("../../../src/acp/receipt") as receipt
 
 let input = json.decode(io.read_file(env.get("ACP_INPUT_FILE").some).ok)
 let s = json.decode(input.state_json)
 let pol = policy.default_enterprise_policy()
 let actor_rec = runtime.actor(input.actor.id, input.actor.roles)
+let tool_version = if rec.has(input, "tool_version") then input.tool_version else "tool-gateway-1.0.0"
 
-let patches = if rec.has(input, "patches") then input.patches else []
+// artifact_json may be a string (from Go) or already a record
+let art_raw = json.decode(input.artifact_json)
 
-let result = runtime.human_state_edit(actor_rec, s, pol, patches)
+// Re-materialize to ensure digest is correct
+let art = artifact.make(
+  art_raw.kind,
+  art_raw.name,
+  art_raw.media_type,
+  art_raw.content,
+  art_raw.producer,
+  art_raw.input_state_hash,
+  art_raw.tool_trace,
+  art_raw.confidence
+)
+
+let result = runtime.commit_artifact(actor_rec, s, pol, tool_version, art)
 
 {
   ok: result.ok,
+  digest: art.digest,
   state_json: json.encode(result.state),
   state_hash: receipt.digest(result.state),
   receipt_json: json.encode(result.receipt),

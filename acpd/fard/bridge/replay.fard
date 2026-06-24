@@ -1,0 +1,29 @@
+import("std/env") as env
+import("std/io") as io
+import("std/json") as json
+import("std/rec") as rec
+import("../../../src/acp/state") as state
+import("../../../src/acp/policy") as policy
+import("../../../src/acp/runtime") as runtime
+import("../../../src/acp/replay") as replay
+import("../../../src/acp/receipt") as receipt
+
+let input = json.decode(io.read_file(env.get("ACP_INPUT_FILE").some).ok)
+let s0 = json.decode(input.initial_state_json)
+let pol = policy.default_enterprise_policy()
+let actor_rec = runtime.actor(input.actor.id, input.actor.roles)
+let tool_version = if rec.has(input, "tool_version") then input.tool_version else "human"
+
+let result = replay.replay(s0, pol, actor_rec, input.events, tool_version)
+let chain_verified = receipt.verify_chain(result.receipts, result.chain_root)
+
+{
+  ok: result.ok,
+  state_json: json.encode(result.state),
+  state_hash: receipt.digest(result.state),
+  chain_root: result.chain_root,
+  chain_verified: chain_verified,
+  receipt_count: result.step,
+  failed_at: if rec.has(result, "failed_at") then result.failed_at else null,
+  error: if rec.has(result, "error") then result.error else null
+}

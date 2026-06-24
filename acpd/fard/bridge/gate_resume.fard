@@ -1,0 +1,28 @@
+import("std/env") as env
+import("std/io") as io
+import("std/json") as json
+import("std/rec") as rec
+import("../../../src/acp/state") as state
+import("../../../src/acp/policy") as policy
+import("../../../src/acp/runtime") as runtime
+import("../../../src/acp/gate") as gate
+import("../../../src/acp/receipt") as receipt
+
+let input = json.decode(io.read_file(env.get("ACP_INPUT_FILE").some).ok)
+let s = json.decode(input.state_json)
+let pol = policy.default_enterprise_policy()
+let actor_rec = runtime.actor(input.actor.id, input.actor.roles)
+let tool_version = if rec.has(input, "tool_version") then input.tool_version else "human"
+
+let result = gate.resume(actor_rec, s, pol, tool_version, input.token, input.resolution)
+
+{
+  ok: result.ok,
+  state_json: if rec.has(result, "state") then json.encode(result.state) else json.encode(s),
+  state_hash: if rec.has(result, "state") then receipt.digest(result.state) else receipt.digest(s),
+  receipt_json: if rec.has(result, "receipt") then json.encode(result.receipt) else "",
+  receipt_digest: if rec.has(result, "receipt") then result.receipt.digest else "",
+  seq: if rec.has(result, "state") then result.state.seq else s.seq,
+  stage: if rec.has(result, "state") then result.state.stage else s.stage,
+  error: if rec.has(result, "error") then result.error else ""
+}

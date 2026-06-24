@@ -1,0 +1,19 @@
+import("std/env") as env
+import("std/io") as io
+import("std/json") as json
+import("../../../src/acp/state") as state
+import("../../../src/acp/receipt") as receipt
+
+let input = json.decode(io.read_file(env.get("ACP_INPUT_FILE").some).ok)
+let s = state.new_workflow(input.workflow_id, input.goal, input.owner)
+let s_json = json.encode(s)
+
+{
+  ok: true,
+  state_json: s_json,
+  state_hash: receipt.digest(s),
+  receipt_json: json.encode({ receipt_type: "acp.init.v1", workflow_id: input.workflow_id, seq: 0, state_hash: receipt.digest(s) }),
+  receipt_digest: receipt.digest({ receipt_type: "acp.init.v1", workflow_id: input.workflow_id, seq: 0, state_hash: receipt.digest(s) }),
+  seq: 0,
+  stage: "created"
+}
