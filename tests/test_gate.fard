@@ -1,0 +1,80 @@
+import("../src/acp/state") as state
+import("../src/acp/policy") as policy
+import("../src/acp/runtime") as runtime
+import("../src/acp/receipt") as receipt
+import("../src/acp/gate") as gate
+import("std/rec") as rec
+
+test "gate open suspends workflow at gated stage" {
+  let p = policy.default_enterprise_policy() in
+  let s0 = state.new_workflow("wf_gate", "gate test", "ops") in
+  let a = runtime.actor("operator:1", ["operator"]) in
+  let input = { tool: "none", patches: [{ path: "stage", value: "decision" }] } in
+
+  let result = gate.open(a, s0, p, input, "manager_spend", 10, { amount: 9000 }) in
+  result.ok &&
+  result.state.stage == "gated" &&
+  rec.has(result, "token") &&
+  result.gate.kind == "manager_spend"
+}
+
+test "gate token is deterministic" {
+  let p = policy.default_enterprise_policy() in
+  let s0 = state.new_workflow("wf_gate", "gate test", "ops") in
+  let a = runtime.actor("operator:1", ["operator"]) in
+  let input = { tool: "none", patches: [{ path: "stage", value: "decision" }] } in
+
+  let r1 = gate.open(a, s0, p, input, "manager_spend", 10, { amount: 9000 }) in
+  let r2 = gate.open(a, s0, p, input, "manager_spend", 10, { amount: 9000 }) in
+  r1.token == r2.token
+}
+
+test "gate resume with valid token commits transition" {
+  let p = policy.default_enterprise_policy() in
+  let s0 = state.new_workflow("wf_gate", "gate test", "ops") in
+  let a = runtime.actor("operator:1", ["operator"]) in
+  let input = { tool: "none", patches: [{ path: "stage", value: "decision" }] } in
+
+  let opened = gate.open(a, s0, p, input, "manager_spend", 10, { amount: 9000 }) in
+  let resumed = gate.resume(a, opened.state, p, "human", opened.token, "approved") in
+  resumed.ok && resumed.state.stage == "decision"
+}
+
+test "gate resume with wrong token is rejected" {
+  let p = policy.default_enterprise_policy() in
+  let s0 = state.new_workflow("wf_gate", "gate test", "ops") in
+  let a = runtime.actor("operator:1", ["operator"]) in
+  let input = { tool: "none", patches: [{ path: "stage", value: "decision" }] } in
+
+  let opened = gate.open(a, s0, p, input, "manager_spend", 10, { amount: 9000 }) in
+  let resumed = gate.resume(a, opened.state, p, "human", "wrong_token", "approved") in
+  !resumed.ok && resumed.error == "GATE_TOKEN_MISMATCH"
+}
+
+test "gate resume with rejected resolution blocks transition" {
+  let p = policy.default_enterprise_policy() in
+  let s0 = state.new_workflow("wf_gate", "gate test", "ops") in
+  let a = runtime.actor("operator:1", ["operator"]) in
+  let input = { tool: "none", patches: [{ path: "stage", value: "decision" }] } in
+
+  let opened = gate.open(a, s0, p, input, "manager_spend", 10, { amount: 9000 }) in
+  let resumed = gate.resume(a, opened.state, p, "human", opened.token, "rejected") in
+  !resumed.ok && resumed.error == "GATE_REJECTED"
+}
+
+test "pending_gate detects open gate" {
+  let p = policy.default_enterprise_policy() in
+  let s0 = state.new_workflow("wf_gate", "gate test", "ops") in
+  let a = runtime.actor("operator:1", ["operator"]) in
+  let input = { tool: "none", patches: [{ path: "stage", value: "decision" }] } in
+
+  let opened = gate.open(a, s0, p, input, "manager_spend", 10, { amount: 9000 }) in
+  let pg = gate.pending_gate(opened.state) in
+  pg.has_gate && pg.gate.kind == "manager_spend" && !pg.expired
+}
+
+test "pending_gate returns no gate on clean state" {
+  let s0 = state.new_workflow("wf_gate", "gate test", "ops") in
+  let pg = gate.pending_gate(s0) in
+  !pg.has_gate
+}

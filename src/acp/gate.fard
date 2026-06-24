@@ -1,0 +1,96 @@
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+import("receipt") as receipt
+import("state") as state
+import("policy") as policy
+import("runtime") as runtime
+
+fn make_gate(token, kind, input, actor_id, deadline_seq, context) {
+  let body = {
+    gate_type: "acp.gate.v1",
+    token: token,
+    kind: kind,
+    input: input,
+    actor_id: actor_id,
+    deadline_seq: deadline_seq,
+    context: context,
+    status: "pending"
+  } in
+  { ...body, digest: receipt.digest(body) }
+}
+
+fn gate_token(gate) {
+  gate.digest
+}
+
+// open suspends a workflow at a gate. Stage becomes "gated" and the gate
+// record is stored in var.gate. The original transition is NOT committed —
+// it will be re-evaluated on resume.
+fn open(actor_rec, before_state, policy_rec, input, gate_kind, deadline_seq, context) {
+  let gate = make_gate(
+    receipt.digest({ kind: gate_kind, input: input, actor: actor_rec.id, seq: before_state.seq }),
+    gate_kind,
+    input,
+    actor_rec.id,
+    before_state.seq + deadline_seq,
+    context
+  ) in
+  let patches = [
+    { path: "stage", value: "gated" },
+    { path: "var.gate", value: gate }
+  ] in
+  let result = runtime.human_state_edit(actor_rec, before_state, policy_rec, patches) in
+  if !result.ok then { ok: false, error: "GATE_OPEN_FAILED", policy: result.policy }
+  else { ok: true, state: result.state, receipt: result.receipt, gate: gate, token: gate_token(gate) }
+}
+
+fn is_expired(gate, current_seq) {
+  current_seq > gate.deadline_seq
+}
+
+// resume attempts to resolve a gate and commit the original transition.
+// The callback must present the correct token. Policy is re-evaluated
+// against current state with the approval added — no policy bypass.
+fn resume(actor_rec, gated_state, policy_rec, tool_version, token, resolution) {
+  if !rec.has(gated_state.variables, "gate") then
+    { ok: false, error: "NO_GATE_FOUND" }
+  else
+    let gate = gated_state.variables.gate in
+    if is_expired(gate, gated_state.seq) then
+      { ok: false, error: "GATE_EXPIRED", gate: gate }
+    else if gate_token(gate) != token then
+      { ok: false, error: "GATE_TOKEN_MISMATCH" }
+    else if resolution == "rejected" then
+      let patches = [
+        { path: "stage", value: "gated_rejected" },
+        { path: "var.gate_resolution", value: { status: "rejected", by: actor_rec.id } }
+      ] in
+      let result = runtime.human_state_edit(actor_rec, gated_state, policy_rec, patches) in
+      { ok: false, error: "GATE_REJECTED", state: result.state, receipt: result.receipt }
+    else
+      let approved_state = state.add_approval(gated_state, {
+        kind: gate.kind,
+        status: "approved",
+        by: actor_rec.id,
+        gate_digest: gate.digest
+      }) in
+      let policy_result = policy.evaluate(policy_rec, approved_state, actor_rec, gate.input) in
+      if !policy_result.ok then
+        { ok: false, error: "GATE_POLICY_STILL_BLOCKED", policy: policy_result, gate: gate }
+      else
+        let original_patches = if rec.has(gate.input, "patches") then gate.input.patches else [] in
+        let resolution_patch = { path: "var.gate_resolution", value: { status: "approved", by: actor_rec.id } } in
+        let all_patches = list.concat([original_patches, [resolution_patch]]) in
+        let result = runtime.human_state_edit(actor_rec, approved_state, policy_rec, all_patches) in
+        { ok: result.ok, state: result.state, receipt: result.receipt, gate: gate, policy: policy_result }
+}
+
+fn pending_gate(current_state) {
+  if rec.has(current_state, "variables") && rec.has(current_state.variables, "gate") then
+    { has_gate: true, gate: current_state.variables.gate, expired: is_expired(current_state.variables.gate, current_state.seq) }
+  else
+    { has_gate: false }
+}
+
+export { make_gate, gate_token, open, resume, pending_gate, is_expired }
