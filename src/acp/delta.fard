@@ -1,0 +1,133 @@
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+import("receipt") as receipt
+import("state") as state
+
+// A delta records the patches applied at each transition plus the
+// cryptographic hashes from the receipt. Storage cost is O(patches)
+// not O(state_size). The baseline (seq: 0) is stored as a full state blob;
+// all subsequent seqs are stored as deltas.
+//
+// NOTE: reconstructed states will not have timeline events — those are
+// runtime-only append structures. Reconstruction gives you the logical
+// state (stage, variables, plan, artifacts, approvals) at any seq.
+// Use verify_delta_chain to confirm hash integrity separately.
+fn make(seq, kind, actor, patches, artifact_digests, state_before_hash, state_after_hash, receipt_digest) {
+  {
+    delta_type: "acp.delta.v1",
+    seq: seq,
+    kind: kind,
+    actor: actor,
+    patches: patches,
+    artifact_digests: artifact_digests,
+    state_before_hash: state_before_hash,
+    state_after_hash: state_after_hash,
+    receipt_digest: receipt_digest
+  }
+}
+
+fn from_transition(transition_result, patches, kind, actor_id) {
+  make(
+    transition_result.state.seq,
+    kind,
+    actor_id,
+    patches,
+    [],
+    transition_result.receipt.state_before_hash,
+    transition_result.receipt.state_after_hash,
+    transition_result.receipt.digest
+  )
+}
+
+fn from_artifact_commit(transition_result, artifact_digest, actor_id) {
+  make(
+    transition_result.state.seq,
+    "artifact_committed",
+    actor_id,
+    [],
+    [artifact_digest],
+    transition_result.receipt.state_before_hash,
+    transition_result.receipt.state_after_hash,
+    transition_result.receipt.digest
+  )
+}
+
+fn sort_deltas(deltas) {
+  list.sort_by(deltas, fn(a, b) { a.seq - b.seq })
+}
+
+// apply_deltas reconstructs logical state by replaying patches forward
+// from a baseline. Timeline events are not reconstructed — use the
+// original state store or timeline service for those.
+// Pass max_seq: -1 to apply all deltas.
+fn apply_deltas(baseline, deltas, max_seq) {
+  let sorted = sort_deltas(deltas) in
+  let applicable = if max_seq < 0 then sorted
+    else list.filter(sorted, fn(d) { d.seq <= max_seq }) in
+  list.fold(applicable, { ok: true, state: baseline, seq: 0 }, fn(acc, d) {
+    if !acc.ok then acc
+    else
+      let next = if list.len(d.patches) > 0
+        then state.bump(state.apply_patches(acc.state, d.patches))
+        else if list.len(d.artifact_digests) > 0
+        then state.bump(state.add_artifact(acc.state, list.head(d.artifact_digests)))
+        else state.bump(acc.state) in
+      { ok: true, state: next, seq: d.seq }
+  })
+}
+
+// reconstruct_at rebuilds logical state at a specific seq.
+fn reconstruct_at(baseline, deltas, target_seq) {
+  apply_deltas(baseline, deltas, target_seq)
+}
+
+// verify_delta_chain confirms the receipt hash chain is unbroken —
+// each delta's state_before_hash must equal the previous state_after_hash.
+// This proves no transition was inserted, removed, or reordered.
+fn verify_delta_chain(baseline_hash, deltas) {
+  let sorted = sort_deltas(deltas) in
+  list.fold(sorted, { ok: true, prev_hash: baseline_hash, seq: 0 }, fn(acc, d) {
+    if !acc.ok then acc
+    else if d.state_before_hash != acc.prev_hash then {
+      ok: false,
+      prev_hash: acc.prev_hash,
+      seq: d.seq,
+      error: "CHAIN_BREAK",
+      expected: acc.prev_hash,
+      got: d.state_before_hash
+    }
+    else { ok: true, prev_hash: d.state_after_hash, seq: d.seq }
+  })
+}
+
+// summarize produces a compact audit log — seq, kind, actor, hashes only.
+fn summarize(deltas) {
+  let sorted = sort_deltas(deltas) in
+  list.map(sorted, fn(d) {
+    {
+      seq: d.seq,
+      kind: d.kind,
+      actor: d.actor,
+      state_before_hash: d.state_before_hash,
+      state_after_hash: d.state_after_hash,
+      receipt_digest: d.receipt_digest,
+      patch_count: list.len(d.patches),
+      artifact_count: list.len(d.artifact_digests)
+    }
+  })
+}
+
+fn storage_report(deltas) {
+  let total_patches = list.fold(deltas, 0, fn(acc, d) { acc + list.len(d.patches) }) in
+  let total_artifact_refs = list.fold(deltas, 0, fn(acc, d) { acc + list.len(d.artifact_digests) }) in
+  {
+    delta_count: list.len(deltas),
+    total_patch_ops: total_patches,
+    total_artifact_refs: total_artifact_refs,
+    baseline_plus_deltas: 1 + list.len(deltas),
+    full_blob_equivalent: 1 + list.len(deltas)
+  }
+}
+
+export { make, from_transition, from_artifact_commit, apply_deltas, reconstruct_at, verify_delta_chain, summarize, storage_report }

@@ -1,0 +1,112 @@
+import("../src/acp/state") as state
+import("../src/acp/policy") as policy
+import("../src/acp/runtime") as runtime
+import("../src/acp/receipt") as receipt
+import("../src/acp/delta") as delta
+import("std/list") as list
+
+test "delta chain reconstructs logical state correctly" {
+  let p = policy.default_enterprise_policy() in
+  let s0 = state.new_workflow("wf_delta", "delta test", "ops") in
+  let a = runtime.actor("operator:1", ["operator"]) in
+
+  let patches1 = [{ path: "stage", value: "research" }] in
+  let r1 = runtime.human_state_edit(a, s0, p, patches1) in
+  let d1 = delta.from_transition(r1, patches1, "human_state_edit", a.id) in
+
+  let patches2 = [{ path: "stage", value: "review" }] in
+  let r2 = runtime.human_state_edit(a, r1.state, p, patches2) in
+  let d2 = delta.from_transition(r2, patches2, "human_state_edit", a.id) in
+
+  let result = delta.apply_deltas(s0, [d1, d2], -1) in
+  result.ok && result.state.stage == "review" && result.state.seq == 2
+}
+
+test "delta reconstruction stops at target seq" {
+  let p = policy.default_enterprise_policy() in
+  let s0 = state.new_workflow("wf_delta", "delta test", "ops") in
+  let a = runtime.actor("operator:1", ["operator"]) in
+
+  let patches1 = [{ path: "stage", value: "research" }] in
+  let r1 = runtime.human_state_edit(a, s0, p, patches1) in
+  let d1 = delta.from_transition(r1, patches1, "human_state_edit", a.id) in
+
+  let patches2 = [{ path: "stage", value: "review" }] in
+  let r2 = runtime.human_state_edit(a, r1.state, p, patches2) in
+  let d2 = delta.from_transition(r2, patches2, "human_state_edit", a.id) in
+
+  let result = delta.reconstruct_at(s0, [d1, d2], 1) in
+  result.ok && result.state.stage == "research" && result.state.seq == 1
+}
+
+test "delta chain verification passes on valid chain" {
+  let p = policy.default_enterprise_policy() in
+  let s0 = state.new_workflow("wf_delta", "delta test", "ops") in
+  let a = runtime.actor("operator:1", ["operator"]) in
+
+  let patches1 = [{ path: "stage", value: "research" }] in
+  let r1 = runtime.human_state_edit(a, s0, p, patches1) in
+  let d1 = delta.from_transition(r1, patches1, "human_state_edit", a.id) in
+
+  let patches2 = [{ path: "var.count", value: 5 }] in
+  let r2 = runtime.human_state_edit(a, r1.state, p, patches2) in
+  let d2 = delta.from_transition(r2, patches2, "human_state_edit", a.id) in
+
+  let baseline_hash = receipt.digest(s0) in
+  delta.verify_delta_chain(baseline_hash, [d1, d2]).ok
+}
+
+test "delta chain verification catches broken chain" {
+  let p = policy.default_enterprise_policy() in
+  let s0 = state.new_workflow("wf_delta", "delta test", "ops") in
+  let s_other = state.new_workflow("wf_other", "other", "ops") in
+  let a = runtime.actor("operator:1", ["operator"]) in
+
+  let patches1 = [{ path: "stage", value: "research" }] in
+  let r1 = runtime.human_state_edit(a, s0, p, patches1) in
+  let d1 = delta.from_transition(r1, patches1, "human_state_edit", a.id) in
+
+  let patches2 = [{ path: "stage", value: "review" }] in
+  let r2 = runtime.human_state_edit(a, s_other, p, patches2) in
+  let d2 = delta.from_transition(r2, patches2, "human_state_edit", a.id) in
+
+  let baseline_hash = receipt.digest(s0) in
+  let verify = delta.verify_delta_chain(baseline_hash, [d1, d2]) in
+  !verify.ok && verify.error == "CHAIN_BREAK"
+}
+
+test "delta summarize produces compact audit log" {
+  let p = policy.default_enterprise_policy() in
+  let s0 = state.new_workflow("wf_delta", "delta test", "ops") in
+  let a = runtime.actor("operator:1", ["operator"]) in
+
+  let patches1 = [{ path: "stage", value: "research" }] in
+  let r1 = runtime.human_state_edit(a, s0, p, patches1) in
+  let d1 = delta.from_transition(r1, patches1, "human_state_edit", a.id) in
+
+  let patches2 = [{ path: "stage", value: "review" }, { path: "var.notes", value: "looks good" }] in
+  let r2 = runtime.human_state_edit(a, r1.state, p, patches2) in
+  let d2 = delta.from_transition(r2, patches2, "human_state_edit", a.id) in
+
+  let summary = delta.summarize([d2, d1]) in
+  list.len(summary) == 2 &&
+  list.head(summary).seq == 1 &&
+  list.get(summary, 1).patch_count == 2
+}
+
+test "storage report reflects delta count" {
+  let p = policy.default_enterprise_policy() in
+  let s0 = state.new_workflow("wf_delta", "delta test", "ops") in
+  let a = runtime.actor("operator:1", ["operator"]) in
+
+  let patches1 = [{ path: "stage", value: "research" }] in
+  let r1 = runtime.human_state_edit(a, s0, p, patches1) in
+  let d1 = delta.from_transition(r1, patches1, "human_state_edit", a.id) in
+
+  let patches2 = [{ path: "stage", value: "review" }] in
+  let r2 = runtime.human_state_edit(a, r1.state, p, patches2) in
+  let d2 = delta.from_transition(r2, patches2, "human_state_edit", a.id) in
+
+  let report = delta.storage_report([d1, d2]) in
+  report.delta_count == 2 && report.total_patch_ops == 2
+}
