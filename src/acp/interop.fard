@@ -1,0 +1,358 @@
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+import("receipt") as receipt
+import("plan") as plan
+import("timeline") as timeline
+import("artifact") as artifact
+
+// Interoperability adapter layer.
+//
+// Ingestion: external framework trace -> ACP plan graph + timeline events + artifacts
+// Export:    ACP workflow state -> external framework workflow definition
+//
+// Supported frameworks:
+//   langgraph   graph-based agent orchestration (nodes, edges, runs)
+//   crewai      task/agent/crew model
+//   temporal    workflow/activity model
+//
+// ACP never calls external framework APIs directly.
+// This module produces and consumes canonical trace records
+// that deployment infrastructure exchanges with framework runtimes.
+
+// ─── SHARED PRIMITIVES ────────────────────────────────────────────────────────
+
+fn normalize_status(raw) {
+  if raw == "completed" || raw == "success" || raw == "done" || raw == "succeeded" then "done"
+  else if raw == "running" || raw == "in_progress" || raw == "active" then "in_progress"
+  else if raw == "blocked" || raw == "waiting" || raw == "suspended" then "blocked"
+  else "pending"
+}
+
+fn normalize_risk(raw) {
+  if raw == "critical" || raw == "high" then raw
+  else if raw == "medium" || raw == "moderate" then "medium"
+  else "low"
+}
+
+fn trace_event(framework, kind, actor, summary, data, seq) {
+  {
+    interop_type: "acp.interop_trace.v1",
+    framework: framework,
+    seq: seq,
+    kind: kind,
+    actor: actor,
+    summary: summary,
+    data: data,
+    digest: receipt.digest({ framework: framework, seq: seq, kind: kind, actor: actor, data: data })
+  }
+}
+
+fn to_timeline_event(trace) {
+  timeline.event(trace.seq, trace.kind, trace.actor, trace.summary, { framework: trace.framework, data: trace.data })
+}
+
+// extract_artifact materializes a framework event output into an ACP artifact.
+// Returns null if the event has no extractable output.
+fn extract_artifact(framework, run_id, event_kind, producer, output, tool_used, media_type, input_state_hash, confidence) {
+  if output == null then null
+  else
+    let name = str.concat([framework, ".", run_id, ".", producer, ".", event_kind]) in
+    artifact.make(
+      event_kind,
+      name,
+      media_type,
+      output,
+      producer,
+      input_state_hash,
+      [{ tool: tool_used, ok: true, framework: framework, run_id: run_id }],
+      confidence
+    )
+}
+
+// extract_artifacts walks a list of raw framework events and materializes
+// any output payloads into ACP artifacts. Returns list of artifacts.
+// Events without output or with empty output are skipped.
+fn extract_artifacts(framework, run_id, events, input_state_hash) {
+  let candidates = list.map(events, fn(e) {
+    let has_output = rec.has(e, "output") && e.output != null in
+    if !has_output then null
+    else
+      let producer = if rec.has(e, "node_id") then e.node_id
+        else if rec.has(e, "agent_id") then e.agent_id
+        else if rec.has(e, "worker_id") then e.worker_id
+        else "unknown" in
+      let tool_used = if rec.has(e, "tool") then e.tool
+        else if rec.has(e, "activity_type") then e.activity_type
+        else "framework" in
+      let event_kind = if rec.has(e, "type") then e.type else "output" in
+      let confidence = if rec.has(e, "confidence") then e.confidence else 75 in
+      let media_type = if rec.has(e, "media_type") then e.media_type else "application/json" in
+      extract_artifact(framework, run_id, event_kind, producer, e.output, tool_used, media_type, input_state_hash, confidence)
+  }) in
+  list.filter(candidates, fn(a) { a != null })
+}
+
+// ─── LANGGRAPH ADAPTER ────────────────────────────────────────────────────────
+
+fn langgraph_ingest_node(lg_node) {
+  let risk = if rec.has(lg_node, "metadata") && rec.has(lg_node.metadata, "risk")
+    then normalize_risk(lg_node.metadata.risk) else "medium" in
+  let schema = if rec.has(lg_node, "metadata") && rec.has(lg_node.metadata, "output_schema")
+    then lg_node.metadata.output_schema else "any" in
+  let agent = if rec.has(lg_node, "agent") then lg_node.agent else lg_node.id in
+  plan.node(lg_node.id, lg_node.name, agent, normalize_status(lg_node.status), risk, schema)
+}
+
+fn langgraph_ingest_edge(lg_edge) {
+  let reason = if rec.has(lg_edge, "condition") then lg_edge.condition else "depends" in
+  plan.edge(lg_edge.source, lg_edge.target, reason)
+}
+
+fn langgraph_ingest_event(lg_event, run_id, seq) {
+  if lg_event.type == "tool_call" then
+    let input_digest = receipt.digest(if rec.has(lg_event, "input") then lg_event.input else {}) in
+    let output_digest = receipt.digest(if rec.has(lg_event, "output") then lg_event.output else {}) in
+    trace_event("langgraph", "tool_call", lg_event.node_id,
+      str.concat(["tool: ", if rec.has(lg_event, "tool") then lg_event.tool else "unknown"]),
+      { run_id: run_id, tool: if rec.has(lg_event, "tool") then lg_event.tool else "unknown",
+        input_digest: input_digest, output_digest: output_digest }, seq)
+  else if lg_event.type == "node_complete" then
+    trace_event("langgraph", "state_transition", lg_event.node_id,
+      str.concat(["node completed: ", lg_event.node_id]),
+      { run_id: run_id, node_id: lg_event.node_id,
+        output_digest: receipt.digest(if rec.has(lg_event, "output") then lg_event.output else {}) }, seq)
+  else if lg_event.type == "handoff" then
+    trace_event("langgraph", "handoff", lg_event.node_id,
+      str.concat(["handoff from ", lg_event.node_id]),
+      { run_id: run_id, from: lg_event.node_id,
+        to: if rec.has(lg_event, "target") then lg_event.target else "unknown" }, seq)
+  else
+    trace_event("langgraph", lg_event.type, lg_event.node_id, lg_event.type, { run_id: run_id }, seq)
+}
+
+fn langgraph_ingest(lg_run) {
+  let input_state_hash = receipt.digest({ run_id: lg_run.run_id, framework: "langgraph" }) in
+  let nodes = list.map(lg_run.nodes, fn(n) { langgraph_ingest_node(n) }) in
+  let edges = list.map(lg_run.edges, fn(e) { langgraph_ingest_edge(e) }) in
+  let g = plan.graph(nodes, edges) in
+  let events = list.map(
+    list.zip(lg_run.events, list.range(1, list.len(lg_run.events) + 1)),
+    fn(pair) { langgraph_ingest_event(list.get(pair, 0), lg_run.run_id, list.get(pair, 1)) }
+  ) in
+  let timeline_events = list.map(events, fn(e) { to_timeline_event(e) }) in
+  let artifacts = extract_artifacts("langgraph", lg_run.run_id, lg_run.events, input_state_hash) in
+  {
+    framework: "langgraph",
+    plan: g,
+    trace_events: events,
+    timeline_events: timeline_events,
+    artifacts: artifacts,
+    artifact_count: list.len(artifacts),
+    run_id: lg_run.run_id
+  }
+}
+
+fn langgraph_export(workflow_state) {
+  let nodes = list.map(workflow_state.plan.nodes, fn(n) {
+    {
+      id: n.id,
+      name: n.title,
+      agent: n.agent,
+      status: if n.status == "done" then "completed" else n.status,
+      metadata: { risk: n.risk, output_schema: n.output_schema, acp_workflow_id: workflow_state.workflow_id }
+    }
+  }) in
+  let edges = list.map(workflow_state.plan.edges, fn(e) {
+    { source: e.from, target: e.to, condition: e.reason }
+  }) in
+  {
+    graph_id: workflow_state.workflow_id,
+    nodes: nodes,
+    edges: edges,
+    metadata: {
+      acp_workflow_id: workflow_state.workflow_id,
+      acp_stage: workflow_state.stage,
+      acp_seq: workflow_state.seq,
+      acp_state_hash: receipt.digest(workflow_state)
+    }
+  }
+}
+
+// ─── CREWAI ADAPTER ───────────────────────────────────────────────────────────
+
+fn crewai_ingest_task(task) {
+  let risk = if rec.has(task, "risk") then normalize_risk(task.risk) else "medium" in
+  let schema = if rec.has(task, "expected_output") then task.expected_output else "any" in
+  plan.node(task.id, task.description, task.agent_id, normalize_status(task.status), risk, schema)
+}
+
+fn crewai_ingest_event(crew_event, crew_id, seq) {
+  if crew_event.type == "task_complete" then
+    trace_event("crewai", "state_transition", crew_event.agent_id,
+      str.concat(["task completed: ", crew_event.task_id]),
+      { crew_id: crew_id, task_id: crew_event.task_id,
+        output_digest: receipt.digest(if rec.has(crew_event, "output") then crew_event.output else {}) }, seq)
+  else if crew_event.type == "tool_use" then
+    trace_event("crewai", "tool_call", crew_event.agent_id,
+      str.concat(["tool: ", if rec.has(crew_event, "tool") then crew_event.tool else "unknown"]),
+      { crew_id: crew_id, task_id: if rec.has(crew_event, "task_id") then crew_event.task_id else "",
+        tool: if rec.has(crew_event, "tool") then crew_event.tool else "unknown" }, seq)
+  else if crew_event.type == "agent_handoff" then
+    trace_event("crewai", "handoff", crew_event.agent_id,
+      str.concat(["handoff: ", crew_event.agent_id]),
+      { crew_id: crew_id, from: crew_event.agent_id,
+        to: if rec.has(crew_event, "target_agent_id") then crew_event.target_agent_id else "unknown" }, seq)
+  else
+    trace_event("crewai", crew_event.type, crew_event.agent_id, crew_event.type, { crew_id: crew_id }, seq)
+}
+
+fn crewai_ingest(crew_run) {
+  let input_state_hash = receipt.digest({ run_id: crew_run.crew_id, framework: "crewai" }) in
+  let nodes = list.map(crew_run.tasks, fn(t) { crewai_ingest_task(t) }) in
+  let g = plan.graph(nodes, []) in
+  let events = list.map(
+    list.zip(crew_run.events, list.range(1, list.len(crew_run.events) + 1)),
+    fn(pair) { crewai_ingest_event(list.get(pair, 0), crew_run.crew_id, list.get(pair, 1)) }
+  ) in
+  let timeline_events = list.map(events, fn(e) { to_timeline_event(e) }) in
+  let artifacts = extract_artifacts("crewai", crew_run.crew_id, crew_run.events, input_state_hash) in
+  {
+    framework: "crewai",
+    plan: g,
+    trace_events: events,
+    timeline_events: timeline_events,
+    artifacts: artifacts,
+    artifact_count: list.len(artifacts),
+    crew_id: crew_run.crew_id
+  }
+}
+
+fn crewai_export(workflow_state) {
+  let tasks = list.map(workflow_state.plan.nodes, fn(n) {
+    {
+      id: n.id,
+      description: n.title,
+      agent_id: n.agent,
+      status: if n.status == "done" then "completed" else n.status,
+      expected_output: n.output_schema,
+      metadata: { acp_workflow_id: workflow_state.workflow_id, risk: n.risk }
+    }
+  }) in
+  {
+    crew_id: workflow_state.workflow_id,
+    tasks: tasks,
+    metadata: {
+      acp_workflow_id: workflow_state.workflow_id,
+      acp_stage: workflow_state.stage,
+      acp_seq: workflow_state.seq,
+      acp_state_hash: receipt.digest(workflow_state)
+    }
+  }
+}
+
+// ─── TEMPORAL ADAPTER ─────────────────────────────────────────────────────────
+
+fn temporal_ingest_activity(activity) {
+  let risk = if rec.has(activity, "risk") then normalize_risk(activity.risk) else "medium" in
+  plan.node(
+    activity.activity_id,
+    activity.activity_type,
+    activity.worker_id,
+    normalize_status(activity.status),
+    risk,
+    activity.activity_type
+  )
+}
+
+fn temporal_ingest_event(temporal_event, run_id, seq) {
+  if temporal_event.type == "ActivityTaskCompleted" then
+    trace_event("temporal", "state_transition", temporal_event.worker_id,
+      str.concat(["activity completed: ", temporal_event.activity_id]),
+      { run_id: run_id, activity_id: temporal_event.activity_id }, seq)
+  else if temporal_event.type == "ActivityTaskScheduled" then
+    trace_event("temporal", "tool_call", temporal_event.worker_id,
+      str.concat(["activity scheduled: ", temporal_event.activity_id]),
+      { run_id: run_id, activity_id: temporal_event.activity_id }, seq)
+  else if temporal_event.type == "ActivityTaskFailed" then
+    trace_event("temporal", "policy_violation", temporal_event.worker_id,
+      str.concat(["activity failed: ", temporal_event.activity_id]),
+      { run_id: run_id, activity_id: temporal_event.activity_id }, seq)
+  else
+    trace_event("temporal", temporal_event.type,
+      if rec.has(temporal_event, "worker_id") then temporal_event.worker_id else "temporal",
+      temporal_event.type, { run_id: run_id }, seq)
+}
+
+fn temporal_ingest(temporal_run) {
+  let input_state_hash = receipt.digest({ run_id: temporal_run.run_id, framework: "temporal" }) in
+  let nodes = list.map(temporal_run.activities, fn(a) { temporal_ingest_activity(a) }) in
+  let g = plan.graph(nodes, []) in
+  let events = list.map(
+    list.zip(temporal_run.events, list.range(1, list.len(temporal_run.events) + 1)),
+    fn(pair) { temporal_ingest_event(list.get(pair, 0), temporal_run.run_id, list.get(pair, 1)) }
+  ) in
+  let timeline_events = list.map(events, fn(e) { to_timeline_event(e) }) in
+  let artifacts = extract_artifacts("temporal", temporal_run.run_id, temporal_run.events, input_state_hash) in
+  {
+    framework: "temporal",
+    plan: g,
+    trace_events: events,
+    timeline_events: timeline_events,
+    artifacts: artifacts,
+    artifact_count: list.len(artifacts),
+    run_id: temporal_run.run_id
+  }
+}
+
+fn temporal_export(workflow_state) {
+  let activities = list.map(workflow_state.plan.nodes, fn(n) {
+    {
+      activity_id: n.id,
+      activity_type: n.title,
+      worker_id: n.agent,
+      status: if n.status == "done" then "ActivityTaskCompleted"
+        else if n.status == "in_progress" then "ActivityTaskStarted"
+        else "ActivityTaskScheduled",
+      metadata: { acp_workflow_id: workflow_state.workflow_id, risk: n.risk }
+    }
+  }) in
+  {
+    workflow_id: workflow_state.workflow_id,
+    workflow_type: workflow_state.goal,
+    status: if workflow_state.stage == "complete" then "WorkflowExecutionCompleted" else "WorkflowExecutionStarted",
+    activities: activities,
+    metadata: {
+      acp_workflow_id: workflow_state.workflow_id,
+      acp_stage: workflow_state.stage,
+      acp_seq: workflow_state.seq,
+      acp_state_hash: receipt.digest(workflow_state)
+    }
+  }
+}
+
+// ─── GENERIC DISPATCH ─────────────────────────────────────────────────────────
+
+fn ingest(framework, run) {
+  if framework == "langgraph" then langgraph_ingest(run)
+  else if framework == "crewai" then crewai_ingest(run)
+  else if framework == "temporal" then temporal_ingest(run)
+  else { ok: false, error: "UNKNOWN_FRAMEWORK", framework: framework }
+}
+
+fn export_to(framework, workflow_state) {
+  if framework == "langgraph" then langgraph_export(workflow_state)
+  else if framework == "crewai" then crewai_export(workflow_state)
+  else if framework == "temporal" then temporal_export(workflow_state)
+  else { ok: false, error: "UNKNOWN_FRAMEWORK", framework: framework }
+}
+
+export {
+  ingest, export_to,
+  langgraph_ingest, langgraph_export,
+  crewai_ingest, crewai_export,
+  temporal_ingest, temporal_export,
+  normalize_status, normalize_risk,
+  trace_event, to_timeline_event,
+  extract_artifacts, extract_artifact
+}

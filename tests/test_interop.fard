@@ -1,0 +1,326 @@
+import("../src/acp/interop") as interop
+import("../src/acp/state") as state
+import("../src/acp/plan") as plan
+import("../src/acp/receipt") as receipt
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+
+// ─── SHARED FIXTURES ──────────────────────────────────────────────────────────
+
+fn sample_workflow_state() {
+  let g = plan.graph([
+    plan.node("research", "Collect evidence", "research_agent", "done", "medium", "evidence"),
+    plan.node("decision", "Recommend vendor", "procurement_agent", "pending", "critical", "recommendation")
+  ], [
+    plan.edge("research", "decision", "evidence required")
+  ]) in
+  let s = state.new_workflow("wf_interop", "interop test", "ops") in
+  state.set_plan(s, g)
+}
+
+// ─── NORMALIZE ────────────────────────────────────────────────────────────────
+
+test "normalize_status maps framework variants to ACP status" {
+  interop.normalize_status("completed") == "done" &&
+  interop.normalize_status("success") == "done" &&
+  interop.normalize_status("running") == "in_progress" &&
+  interop.normalize_status("waiting") == "blocked" &&
+  interop.normalize_status("queued") == "pending"
+}
+
+test "normalize_risk maps framework variants to ACP risk" {
+  interop.normalize_risk("critical") == "critical" &&
+  interop.normalize_risk("moderate") == "medium" &&
+  interop.normalize_risk("low") == "low"
+}
+
+// ─── LANGGRAPH ────────────────────────────────────────────────────────────────
+
+fn sample_langgraph_run() {
+  {
+    run_id: "lg_run_001",
+    nodes: [
+      { id: "research", name: "Collect evidence", agent: "research_agent", status: "completed", metadata: { risk: "medium", output_schema: "evidence" } },
+      { id: "decision", name: "Recommend vendor", agent: "procurement_agent", status: "pending", metadata: { risk: "critical", output_schema: "recommendation" } }
+    ],
+    edges: [
+      { source: "research", target: "decision", condition: "evidence required" }
+    ],
+    events: [
+      { type: "tool_call", node_id: "research", tool: "search", input: { q: "vendor" }, output: { results: [] } },
+      { type: "node_complete", node_id: "research", output: { summary: "done" } },
+      { type: "handoff", node_id: "research", target: "decision" }
+    ]
+  }
+}
+
+test "langgraph ingest produces plan graph with correct nodes" {
+  let result = interop.langgraph_ingest(sample_langgraph_run()) in
+  list.len(result.plan.nodes) == 2 &&
+  list.head(result.plan.nodes).id == "research" &&
+  list.head(result.plan.nodes).status == "done"
+}
+
+test "langgraph ingest produces plan graph with correct edges" {
+  let result = interop.langgraph_ingest(sample_langgraph_run()) in
+  list.len(result.plan.edges) == 1 &&
+  list.head(result.plan.edges).from == "research"
+}
+
+test "langgraph ingest produces timeline events" {
+  let result = interop.langgraph_ingest(sample_langgraph_run()) in
+  list.len(result.timeline_events) == 3 &&
+  list.head(result.timeline_events).kind == "tool_call"
+}
+
+test "langgraph ingest trace events have digests" {
+  let result = interop.langgraph_ingest(sample_langgraph_run()) in
+  list.all(result.trace_events, fn(e) { str.starts_with(e.digest, "sha256:") })
+}
+
+test "langgraph export produces graph definition" {
+  let ws = sample_workflow_state() in
+  let exported = interop.langgraph_export(ws) in
+  exported.graph_id == "wf_interop" &&
+  list.len(exported.nodes) == 2 &&
+  list.len(exported.edges) == 1 &&
+  list.head(exported.nodes).status == "completed"
+}
+
+test "langgraph export embeds acp state hash in metadata" {
+  let ws = sample_workflow_state() in
+  let exported = interop.langgraph_export(ws) in
+  str.starts_with(exported.metadata.acp_state_hash, "sha256:")
+}
+
+test "langgraph round-trip preserves node count" {
+  let ws = sample_workflow_state() in
+  let exported = interop.langgraph_export(ws) in
+  let reimported = interop.langgraph_ingest({
+    run_id: "rt_001",
+    nodes: exported.nodes,
+    edges: exported.edges,
+    events: []
+  }) in
+  list.len(reimported.plan.nodes) == list.len(ws.plan.nodes)
+}
+
+// ─── CREWAI ───────────────────────────────────────────────────────────────────
+
+fn sample_crewai_run() {
+  {
+    crew_id: "crew_001",
+    agents: [
+      { id: "research_agent", role: "Researcher", goal: "Collect vendor evidence" },
+      { id: "procurement_agent", role: "Procurement", goal: "Recommend vendor" }
+    ],
+    tasks: [
+      { id: "task_research", description: "Collect evidence", agent_id: "research_agent", status: "completed", expected_output: "evidence" },
+      { id: "task_decision", description: "Recommend vendor", agent_id: "procurement_agent", status: "pending", expected_output: "recommendation" }
+    ],
+    events: [
+      { type: "tool_use", task_id: "task_research", agent_id: "research_agent", tool: "search" },
+      { type: "task_complete", task_id: "task_research", agent_id: "research_agent", output: { summary: "done" } },
+      { type: "agent_handoff", agent_id: "research_agent", target_agent_id: "procurement_agent" }
+    ]
+  }
+}
+
+test "crewai ingest produces plan nodes from tasks" {
+  let result = interop.crewai_ingest(sample_crewai_run()) in
+  list.len(result.plan.nodes) == 2 &&
+  list.head(result.plan.nodes).agent == "research_agent"
+}
+
+test "crewai ingest produces timeline events" {
+  let result = interop.crewai_ingest(sample_crewai_run()) in
+  list.len(result.timeline_events) == 3
+}
+
+test "crewai export produces task list" {
+  let ws = sample_workflow_state() in
+  let exported = interop.crewai_export(ws) in
+  exported.crew_id == "wf_interop" &&
+  list.len(exported.tasks) == 2 &&
+  list.head(exported.tasks).agent_id == "research_agent"
+}
+
+// ─── TEMPORAL ─────────────────────────────────────────────────────────────────
+
+fn sample_temporal_run() {
+  {
+    run_id: "temporal_run_001",
+    workflow: { workflow_id: "wf_interop", workflow_type: "VendorSelection", status: "WorkflowExecutionStarted" },
+    activities: [
+      { activity_id: "research", activity_type: "CollectEvidence", worker_id: "research_worker", status: "completed" },
+      { activity_id: "decision", activity_type: "RecommendVendor", worker_id: "procurement_worker", status: "ActivityTaskScheduled" }
+    ],
+    events: [
+      { type: "ActivityTaskScheduled", activity_id: "research", worker_id: "research_worker" },
+      { type: "ActivityTaskCompleted", activity_id: "research", worker_id: "research_worker" },
+      { type: "ActivityTaskFailed", activity_id: "decision", worker_id: "procurement_worker" }
+    ]
+  }
+}
+
+test "temporal ingest produces plan nodes from activities" {
+  let result = interop.temporal_ingest(sample_temporal_run()) in
+  list.len(result.plan.nodes) == 2 &&
+  list.head(result.plan.nodes).id == "research"
+}
+
+test "temporal ingest maps activity statuses correctly" {
+  let result = interop.temporal_ingest(sample_temporal_run()) in
+  list.head(result.plan.nodes).status == "done"
+}
+
+test "temporal ingest produces timeline events with correct kinds" {
+  let result = interop.temporal_ingest(sample_temporal_run()) in
+  let kinds = list.map(result.timeline_events, fn(e) { e.kind }) in
+  list.len(kinds) == 3 &&
+  list.get(kinds, 2) == "policy_violation"
+}
+
+test "temporal export maps ACP status to Temporal event types" {
+  let ws = sample_workflow_state() in
+  let exported = interop.temporal_export(ws) in
+  let first = list.head(exported.activities) in
+  first.status == "ActivityTaskCompleted"
+}
+
+test "temporal export embeds acp metadata" {
+  let ws = sample_workflow_state() in
+  let exported = interop.temporal_export(ws) in
+  exported.metadata.acp_workflow_id == "wf_interop" &&
+  str.starts_with(exported.metadata.acp_state_hash, "sha256:")
+}
+
+// ─── GENERIC DISPATCH ─────────────────────────────────────────────────────────
+
+test "generic ingest dispatches to correct framework" {
+  let lg_result = interop.ingest("langgraph", sample_langgraph_run()) in
+  let crew_result = interop.ingest("crewai", sample_crewai_run()) in
+  let temporal_result = interop.ingest("temporal", sample_temporal_run()) in
+  lg_result.framework == "langgraph" &&
+  crew_result.framework == "crewai" &&
+  temporal_result.framework == "temporal"
+}
+
+test "generic ingest returns error for unknown framework" {
+  let result = interop.ingest("unknown_framework", {}) in
+  result.ok == false && result.error == "UNKNOWN_FRAMEWORK"
+}
+
+test "generic export dispatches to correct framework" {
+  let ws = sample_workflow_state() in
+  let lg = interop.export_to("langgraph", ws) in
+  let crew = interop.export_to("crewai", ws) in
+  let temporal = interop.export_to("temporal", ws) in
+  rec.has(lg, "graph_id") && rec.has(crew, "crew_id") && rec.has(temporal, "workflow_id")
+}
+
+// ─── ARTIFACT EXTRACTION ──────────────────────────────────────────────────────
+
+test "langgraph ingest extracts artifacts from node outputs" {
+  let run = {
+    run_id: "lg_art_001",
+    nodes: [
+      { id: "research", name: "Collect evidence", agent: "research_agent", status: "completed", metadata: { risk: "medium", output_schema: "evidence" } }
+    ],
+    edges: [],
+    events: [
+      { type: "node_complete", node_id: "research", output: { summary: "Vendor A preferred", sources: 3 } },
+      { type: "handoff", node_id: "research", target: "decision" }
+    ]
+  } in
+  let result = interop.langgraph_ingest(run) in
+  result.artifact_count == 1 &&
+  list.head(result.artifacts).producer == "research" &&
+  str.starts_with(list.head(result.artifacts).digest, "sha256:")
+}
+
+test "langgraph ingest skips events without output" {
+  let run = {
+    run_id: "lg_art_002",
+    nodes: [],
+    edges: [],
+    events: [
+      { type: "handoff", node_id: "research", target: "decision" }
+    ]
+  } in
+  let result = interop.langgraph_ingest(run) in
+  result.artifact_count == 0
+}
+
+test "langgraph ingest extracts multiple artifacts from multiple output events" {
+  let run = {
+    run_id: "lg_art_003",
+    nodes: [],
+    edges: [],
+    events: [
+      { type: "node_complete", node_id: "research", output: { summary: "done" } },
+      { type: "node_complete", node_id: "finance", output: { score: 87 } },
+      { type: "handoff", node_id: "finance", target: "decision" }
+    ]
+  } in
+  let result = interop.langgraph_ingest(run) in
+  result.artifact_count == 2
+}
+
+test "crewai ingest extracts artifacts from task outputs" {
+  let run = {
+    crew_id: "crew_art_001",
+    agents: [],
+    tasks: [
+      { id: "task_research", description: "Collect evidence", agent_id: "research_agent", status: "completed", expected_output: "evidence" }
+    ],
+    events: [
+      { type: "task_complete", task_id: "task_research", agent_id: "research_agent", output: { findings: "Vendor A meets criteria" } }
+    ]
+  } in
+  let result = interop.crewai_ingest(run) in
+  result.artifact_count == 1 &&
+  list.head(result.artifacts).producer == "research_agent"
+}
+
+test "temporal ingest extracts artifacts from completed activities" {
+  let run = {
+    run_id: "temporal_art_001",
+    workflow: { workflow_id: "wf_interop", workflow_type: "VendorSelection", status: "WorkflowExecutionStarted" },
+    activities: [
+      { activity_id: "research", activity_type: "CollectEvidence", worker_id: "research_worker", status: "completed" }
+    ],
+    events: [
+      { type: "ActivityTaskCompleted", activity_id: "research", worker_id: "research_worker", output: { result: "done" } }
+    ]
+  } in
+  let result = interop.temporal_ingest(run) in
+  result.artifact_count == 1 &&
+  list.head(result.artifacts).producer == "research_worker"
+}
+
+test "extracted artifact has correct tool trace from framework event" {
+  let run = {
+    run_id: "lg_art_004",
+    nodes: [],
+    edges: [],
+    events: [
+      { type: "tool_call", node_id: "research", tool: "search", input: { q: "vendor" }, output: { results: ["a", "b"] } }
+    ]
+  } in
+  let result = interop.langgraph_ingest(run) in
+  let art = list.head(result.artifacts) in
+  list.len(art.tool_trace) == 1 &&
+  list.head(art.tool_trace).tool == "search" &&
+  list.head(art.tool_trace).framework == "langgraph"
+}
+
+test "extract_artifacts returns empty list when no events have output" {
+  let events = [
+    { type: "handoff", node_id: "a", target: "b" },
+    { type: "tool_call", node_id: "a", tool: "search" }
+  ] in
+  let artifacts = interop.extract_artifacts("langgraph", "run_001", events, "sha256:abc") in
+  list.len(artifacts) == 0
+}
