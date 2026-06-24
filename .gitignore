@@ -21,3 +21,6 @@ acp-load-*
 
 # OS
 .DS_Store
+
+# Postgres test receipt files
+acpd/tests/postgres/receipts/
