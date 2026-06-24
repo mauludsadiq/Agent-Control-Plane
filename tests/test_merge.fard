@@ -1,0 +1,223 @@
+import("../src/acp/merge") as merge
+import("../src/acp/interop") as interop
+import("../src/acp/artifact") as artifact
+import("../src/acp/receipt") as receipt
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+
+// ─── FIXTURES ─────────────────────────────────────────────────────────────────
+
+fn langgraph_run() {
+  {
+    run_id: "lg_run_001",
+    nodes: [
+      { id: "research", name: "Collect evidence", agent: "research_agent", status: "completed", metadata: { risk: "medium", output_schema: "evidence" } }
+    ],
+    edges: [],
+    events: [
+      { type: "node_complete", node_id: "research", output: { summary: "done" } }
+    ]
+  }
+}
+
+fn crewai_run() {
+  {
+    crew_id: "crew_001",
+    agents: [],
+    tasks: [
+      { id: "legal_review", description: "Review contract", agent_id: "legal_agent", status: "pending", expected_output: "legal_findings" }
+    ],
+    events: [
+      { type: "tool_use", task_id: "legal_review", agent_id: "legal_agent", tool: "diff_contract" }
+    ]
+  }
+}
+
+fn temporal_run() {
+  {
+    run_id: "temporal_run_001",
+    workflow: { workflow_id: "wf_merge", workflow_type: "VendorSelection", status: "WorkflowExecutionStarted" },
+    activities: [
+      { activity_id: "scoring", activity_type: "ScoreVendor", worker_id: "finance_worker", status: "completed" }
+    ],
+    events: [
+      { type: "ActivityTaskCompleted", activity_id: "scoring", worker_id: "finance_worker", output: { score: 87 } }
+    ]
+  }
+}
+
+fn three_framework_ingests() {
+  let lg = interop.langgraph_ingest(langgraph_run()) in
+  let crew = interop.crewai_ingest(crewai_run()) in
+  let temporal = interop.temporal_ingest(temporal_run()) in
+  [lg, crew, temporal]
+}
+
+// ─── SEQ RECONCILIATION ───────────────────────────────────────────────────────
+
+test "reseq assigns monotonic seq from offset" {
+  let events = [
+    { seq: 1, kind: "tool_call", actor: "a", summary: "s", data: {} },
+    { seq: 1, kind: "state_transition", actor: "b", summary: "s", data: {} }
+  ] in
+  let result = merge.reseq_events(events, 5) in
+  list.get(result.events, 0).seq == 6 &&
+  list.get(result.events, 1).seq == 7 &&
+  result.seq == 7
+}
+
+// ─── CONFLICT DETECTION ───────────────────────────────────────────────────────
+
+test "find_node_conflicts detects duplicate node ids across frameworks" {
+  let lg = interop.langgraph_ingest({
+    run_id: "lg_001",
+    nodes: [{ id: "research", name: "Research", agent: "agent", status: "completed", metadata: { risk: "low", output_schema: "x" } }],
+    edges: [], events: []
+  }) in
+  let crew = interop.crewai_ingest({
+    crew_id: "crew_001", agents: [],
+    tasks: [{ id: "research", description: "Research", agent_id: "agent", status: "pending", expected_output: "x" }],
+    events: []
+  }) in
+  let conflicts = merge.find_node_conflicts([lg, crew]) in
+  let deduped = merge.dedupe_conflicts(conflicts) in
+  list.len(deduped) == 1 && list.head(deduped).id == "research"
+}
+
+test "find_node_conflicts returns empty when no duplicates" {
+  let ingests = three_framework_ingests() in
+  let conflicts = merge.find_node_conflicts(ingests) in
+  list.len(conflicts) == 0
+}
+
+// ─── PLAN GRAPH MERGE ─────────────────────────────────────────────────────────
+
+test "merge combines nodes from all frameworks" {
+  let ingests = three_framework_ingests() in
+  let result = merge.merge(ingests, [], "wf_merged") in
+  list.len(result.plan.nodes) == 3
+}
+
+test "merge combines edges including cross-framework edges" {
+  let ingests = three_framework_ingests() in
+  let cross = [merge.cross_edge("langgraph.research", "crewai.legal_review", "evidence feeds legal")] in
+  let result = merge.merge(ingests, cross, "wf_merged") in
+  let cross_edges = list.filter(result.plan.edges, fn(e) { rec.has(e, "cross_framework") && e.cross_framework }) in
+  list.len(cross_edges) == 1 &&
+  list.head(cross_edges).from == "langgraph.research"
+}
+
+test "merge prefixes node ids when conflicts exist" {
+  let lg = interop.langgraph_ingest({
+    run_id: "lg_001",
+    nodes: [{ id: "task1", name: "Task", agent: "agent", status: "completed", metadata: { risk: "low", output_schema: "x" } }],
+    edges: [], events: []
+  }) in
+  let crew = interop.crewai_ingest({
+    crew_id: "crew_001", agents: [],
+    tasks: [{ id: "task1", description: "Task", agent_id: "agent", status: "pending", expected_output: "x" }],
+    events: []
+  }) in
+  let result = merge.merge([lg, crew], [], "wf_conflict") in
+  result.has_conflicts &&
+  list.any(result.plan.nodes, fn(n) { n.id == "langgraph.task1" }) &&
+  list.any(result.plan.nodes, fn(n) { n.id == "crewai.task1" })
+}
+
+// ─── TIMELINE MERGE ───────────────────────────────────────────────────────────
+
+test "merge produces globally ordered timeline" {
+  let ingests = three_framework_ingests() in
+  let result = merge.merge(ingests, [], "wf_merged") in
+  let seqs = list.map(result.timeline_events, fn(e) { e.seq }) in
+  list.len(seqs) == result.timeline_event_count &&
+  list.head(seqs) == 1
+}
+
+test "merged timeline seq numbers are strictly increasing" {
+  let ingests = three_framework_ingests() in
+  let result = merge.merge(ingests, [], "wf_merged") in
+  let seqs = list.map(result.timeline_events, fn(e) { e.seq }) in
+  let pairs = list.zip(seqs, list.drop(seqs, 1)) in
+  list.all(pairs, fn(p) { list.get(p, 0) < list.get(p, 1) })
+}
+
+// ─── ARTIFACT MERGE ───────────────────────────────────────────────────────────
+
+test "merge combines artifacts from all frameworks" {
+  let ingests = three_framework_ingests() in
+  let result = merge.merge(ingests, [], "wf_merged") in
+  result.artifact_count >= 2
+}
+
+test "merge deduplicates artifacts with identical digests" {
+  // Build the same artifact twice and put it in two fake ingest results
+  let shared_art = artifact.make("summary", "shared.md", "text/markdown",
+    "same content", "agent:1", "sha256:abc", [{ tool: "search", ok: true }], 90) in
+  let fake_ingest_a = {
+    framework: "langgraph", plan: { nodes: [], edges: [] },
+    trace_events: [], timeline_events: [],
+    artifacts: [shared_art], artifact_count: 1, run_id: "lg_001"
+  } in
+  let fake_ingest_b = {
+    framework: "crewai", plan: { nodes: [], edges: [] },
+    trace_events: [], timeline_events: [],
+    artifacts: [shared_art], artifact_count: 1, crew_id: "crew_001"
+  } in
+  let result = merge.merge([fake_ingest_a, fake_ingest_b], [], "wf_dedup") in
+  result.artifact_count == 1
+}
+
+// ─── CHAIN ROOT ───────────────────────────────────────────────────────────────
+
+test "merged chain root is deterministic" {
+  let ingests = three_framework_ingests() in
+  let r1 = merge.merge(ingests, [], "wf_merged") in
+  let r2 = merge.merge(ingests, [], "wf_merged") in
+  r1.chain_root == r2.chain_root
+}
+
+test "merged chain root changes when framework runs change" {
+  let ingests_a = three_framework_ingests() in
+  let lg_different = interop.langgraph_ingest({
+    run_id: "lg_different",
+    nodes: [{ id: "research2", name: "Different", agent: "agent2", status: "pending", metadata: { risk: "high", output_schema: "y" } }],
+    edges: [], events: []
+  }) in
+  let crew = interop.crewai_ingest(crewai_run()) in
+  let temporal = interop.temporal_ingest(temporal_run()) in
+  let ingests_b = [lg_different, crew, temporal] in
+  let r1 = merge.merge(ingests_a, [], "wf_merged") in
+  let r2 = merge.merge(ingests_b, [], "wf_merged") in
+  r1.chain_root != r2.chain_root
+}
+
+// ─── FRAMEWORK SUBGRAPH ───────────────────────────────────────────────────────
+
+test "framework_subgraph extracts nodes for one framework" {
+  let ingests = three_framework_ingests() in
+  let result = merge.merge(ingests, [], "wf_merged") in
+  let lg_sub = merge.framework_subgraph(result, "langgraph") in
+  list.len(lg_sub.nodes) == 1 &&
+  list.head(lg_sub.nodes).framework == "langgraph"
+}
+
+// ─── SUMMARY ──────────────────────────────────────────────────────────────────
+
+test "summary reports correct framework count and node count" {
+  let ingests = three_framework_ingests() in
+  let result = merge.merge(ingests, [], "wf_merged") in
+  let s = merge.summary(result) in
+  s.framework_count == 3 &&
+  s.node_count == 3 &&
+  s.workflow_id == "wf_merged" &&
+  !s.has_conflicts
+}
+
+test "provenance digest is stable for same inputs" {
+  let ingests = three_framework_ingests() in
+  let r1 = merge.merge(ingests, [], "wf_merged") in
+  let r2 = merge.merge(ingests, [], "wf_merged") in
+  r1.provenance_digest == r2.provenance_digest
+}

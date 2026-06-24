@@ -1,0 +1,224 @@
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+import("receipt") as receipt
+import("plan") as plan
+import("timeline") as timeline
+
+// Multi-framework workflow merger.
+//
+// Combines ingested results from multiple framework adapters into one
+// coherent ACP workflow: single plan graph, single timeline, single
+// artifact shelf, single receipt chain root.
+//
+// A merged result carries provenance for every node, event, and artifact
+// back to its originating framework and run_id. Cross-framework edges
+// can be declared explicitly to connect nodes across framework boundaries.
+//
+// Conflict detection is strict: duplicate node ids across frameworks
+// surface as conflicts — never silently overwritten.
+
+// ─── SEQ RECONCILIATION ───────────────────────────────────────────────────────
+
+// reseq_events assigns globally monotonic seq numbers to a list of
+// timeline events, starting from offset+1. Returns { events, next_seq }.
+fn reseq_events(events, offset) {
+  let result = list.fold(events, { events: [], seq: offset }, fn(acc, e) {
+    let new_seq = acc.seq + 1 in
+    let reseqd = { ...e, seq: new_seq } in
+    { events: list.append(acc.events, reseqd), seq: new_seq }
+  }) in
+  result
+}
+
+// ─── CONFLICT DETECTION ───────────────────────────────────────────────────────
+
+// find_node_conflicts identifies node ids that appear in more than one
+// ingested result. Returns list of { id, frameworks } conflict records.
+fn find_node_conflicts(ingested_results) {
+  let all_nodes = list.flat_map(ingested_results, fn(r) {
+    list.map(r.plan.nodes, fn(n) { { id: n.id, framework: r.framework } })
+  }) in
+  let ids = list.map(all_nodes, fn(n) { n.id }) in
+  list.filter(
+    list.map(all_nodes, fn(n) {
+      let matches = list.filter(all_nodes, fn(m) { m.id == n.id }) in
+      if list.len(matches) > 1 then
+        { conflict: true, id: n.id, frameworks: list.map(matches, fn(m) { m.framework }) }
+      else null
+    }),
+    fn(x) { x != null && rec.has(x, "conflict") }
+  )
+}
+
+// dedupe_conflicts removes duplicate conflict records (same id reported
+// once per node rather than once per occurrence).
+fn dedupe_conflicts(conflicts) {
+  list.fold(conflicts, [], fn(acc, c) {
+    if list.any(acc, fn(a) { a.id == c.id }) then acc
+    else list.append(acc, c)
+  })
+}
+
+// ─── PLAN GRAPH MERGE ─────────────────────────────────────────────────────────
+
+// prefix_node prefixes a node id with framework name to avoid collisions
+// when merging conflicting node ids.
+fn prefix_node(node, framework) {
+  { ...node, id: str.concat([framework, ".", node.id]), original_id: node.id, framework: framework }
+}
+
+// prefix_edge prefixes edge from/to with framework name.
+fn prefix_edge(edge, framework) {
+  { ...edge, from: str.concat([framework, ".", edge.from]), to: str.concat([framework, ".", edge.to]), framework: framework }
+}
+
+// merge_plans combines plan graphs from multiple ingested results.
+// If conflicts exist and resolve_conflicts is true, node ids are prefixed
+// with their framework name. If false, conflicts are reported and merging
+// proceeds with prefixing anyway (safe default).
+// cross_edges: list of { from, to, reason } edges connecting nodes across frameworks.
+fn merge_plans(ingested_results, cross_edges, resolve_conflicts) {
+  let conflicts = dedupe_conflicts(find_node_conflicts(ingested_results)) in
+  let has_conflicts = list.len(conflicts) > 0 in
+  let nodes = list.flat_map(ingested_results, fn(r) {
+    list.map(r.plan.nodes, fn(n) {
+      if has_conflicts then prefix_node(n, r.framework)
+      else { ...n, framework: r.framework }
+    })
+  }) in
+  let edges = list.flat_map(ingested_results, fn(r) {
+    list.map(r.plan.edges, fn(e) {
+      if has_conflicts then prefix_edge(e, r.framework)
+      else { ...e, framework: r.framework }
+    })
+  }) in
+  let all_edges = list.concat([edges, cross_edges]) in
+  {
+    graph: plan.graph(nodes, all_edges),
+    conflicts: conflicts,
+    has_conflicts: has_conflicts,
+    framework_count: list.len(ingested_results)
+  }
+}
+
+// ─── TIMELINE MERGE ───────────────────────────────────────────────────────────
+
+// merge_timelines combines timeline events from multiple ingested results,
+// reassigning globally monotonic seq numbers ordered by framework input order.
+// Events from each framework are grouped by framework then interleaved.
+fn merge_timelines(ingested_results) {
+  let result = list.fold(ingested_results, { all_events: [], seq: 0 }, fn(acc, r) {
+    let reseqd = reseq_events(r.timeline_events, acc.seq) in
+    { all_events: list.concat([acc.all_events, reseqd.events]), seq: reseqd.seq }
+  }) in
+  result.all_events
+}
+
+// ─── ARTIFACT MERGE ───────────────────────────────────────────────────────────
+
+// merge_artifacts combines artifact lists from all ingested results.
+// Dedupes by digest — same artifact from two frameworks appears once.
+fn merge_artifacts(ingested_results) {
+  let all = list.flat_map(ingested_results, fn(r) { r.artifacts }) in
+  list.fold(all, [], fn(acc, a) {
+    if list.any(acc, fn(x) { x.digest == a.digest }) then acc
+    else list.append(acc, a)
+  })
+}
+
+// ─── CHAIN ROOT ───────────────────────────────────────────────────────────────
+
+// merged_chain_root computes a single chain root committing to all
+// framework run ids and their individual artifact/trace digests.
+// This is NOT the same as a receipt chain — it is a provenance root
+// that proves which framework runs contributed to this merged workflow.
+fn merged_chain_root(ingested_results) {
+  let run_digests = list.map(ingested_results, fn(r) {
+    receipt.digest({
+      framework: r.framework,
+      run_id: if rec.has(r, "run_id") then r.run_id
+        else if rec.has(r, "crew_id") then r.crew_id
+        else "unknown",
+      trace_count: list.len(r.trace_events),
+      artifact_count: r.artifact_count
+    })
+  }) in
+  receipt.digest(run_digests)
+}
+
+// ─── MAIN ENTRY POINT ─────────────────────────────────────────────────────────
+
+// merge combines multiple ingested framework results into one ACP workflow.
+// ingested_results: list of results from interop.langgraph_ingest,
+//   interop.crewai_ingest, interop.temporal_ingest, etc.
+// cross_edges: optional list of { from, to, reason } edges connecting
+//   nodes across framework boundaries. Use prefixed ids if conflicts exist.
+// workflow_id: the ACP workflow id to assign to the merged result.
+fn merge(ingested_results, cross_edges, workflow_id) {
+  let plan_result = merge_plans(ingested_results, cross_edges, true) in
+  let merged_timeline = merge_timelines(ingested_results) in
+  let merged_artifacts = merge_artifacts(ingested_results) in
+  let chain_root = merged_chain_root(ingested_results) in
+  let frameworks = list.map(ingested_results, fn(r) { r.framework }) in
+  {
+    merge_type: "acp.merged_workflow.v1",
+    workflow_id: workflow_id,
+    frameworks: frameworks,
+    framework_count: list.len(ingested_results),
+    plan: plan_result.graph,
+    timeline_events: merged_timeline,
+    artifacts: merged_artifacts,
+    artifact_count: list.len(merged_artifacts),
+    timeline_event_count: list.len(merged_timeline),
+    conflicts: plan_result.conflicts,
+    has_conflicts: plan_result.has_conflicts,
+    chain_root: chain_root,
+    provenance_digest: receipt.digest({
+      workflow_id: workflow_id,
+      frameworks: frameworks,
+      chain_root: chain_root
+    })
+  }
+}
+
+// cross_edge creates an explicit edge connecting nodes across framework
+// boundaries. Use prefixed ids (framework.node_id) when conflicts exist.
+fn cross_edge(from_node, to_node, reason) {
+  { from: from_node, to: to_node, reason: reason, cross_framework: true }
+}
+
+// framework_subgraph extracts the nodes and edges belonging to one
+// framework from a merged plan graph.
+fn framework_subgraph(merged, framework) {
+  let nodes = list.filter(merged.plan.nodes, fn(n) {
+    rec.has(n, "framework") && n.framework == framework
+  }) in
+  let node_ids = list.map(nodes, fn(n) { n.id }) in
+  let edges = list.filter(merged.plan.edges, fn(e) {
+    list.any(node_ids, fn(id) { id == e.from })
+  }) in
+  plan.graph(nodes, edges)
+}
+
+// summary produces a human-readable merge status record.
+fn summary(merged) {
+  {
+    workflow_id: merged.workflow_id,
+    frameworks: merged.frameworks,
+    framework_count: merged.framework_count,
+    node_count: list.len(merged.plan.nodes),
+    edge_count: list.len(merged.plan.edges),
+    timeline_event_count: merged.timeline_event_count,
+    artifact_count: merged.artifact_count,
+    has_conflicts: merged.has_conflicts,
+    conflict_count: list.len(merged.conflicts),
+    chain_root: merged.chain_root
+  }
+}
+
+export {
+  merge, cross_edge, framework_subgraph, summary,
+  merge_plans, merge_timelines, merge_artifacts, merged_chain_root,
+  find_node_conflicts, dedupe_conflicts, reseq_events
+}
