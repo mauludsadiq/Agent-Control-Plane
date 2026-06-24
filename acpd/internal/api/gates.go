@@ -5,6 +5,7 @@ import (
 "net/http"
 
 "github.com/mauludsadiq/agent-control-plane/acpd/internal/auth"
+"github.com/mauludsadiq/agent-control-plane/acpd/internal/store"
 )
 
 func (h *Handlers) resumeGate(w http.ResponseWriter, r *http.Request, workflowID, token string) {
@@ -50,19 +51,36 @@ var result struct {
 OK            bool   `json:"ok"`
 StateJSON     string `json:"state_json"`
 StateHash     string `json:"state_hash"`
+ReceiptJSON   string `json:"receipt_json"`
 ReceiptDigest string `json:"receipt_digest"`
 Error         string `json:"error"`
 Seq           int    `json:"seq"`
 }
 err = h.br.RunAndUnmarshal("gate_resume.fard", map[string]any{
-"state_json":  snap.StateJSON,
-"actor":       actor,
-"token":       token,
-"resolution":  req.Resolution,
+"state_json":   snap.StateJSON,
+"actor":        actor,
+"token":        token,
+"resolution":   req.Resolution,
 "tool_version": "human",
 }, &result)
 if err != nil {
 writeErr(w, http.StatusInternalServerError, err.Error())
+return
+}
+
+if commitErr := h.db.CommitGateResolution(
+workflowID, token, req.Resolution, actor.ActorID,
+&store.TransitionResult{
+OK:            result.OK,
+StateJSON:     result.StateJSON,
+StateHash:     result.StateHash,
+ReceiptJSON:   result.ReceiptJSON,
+ReceiptDigest: result.ReceiptDigest,
+Seq:           result.Seq,
+},
+h.snapshotEvery,
+); commitErr != nil {
+writeErr(w, http.StatusInternalServerError, "commit gate failed: "+commitErr.Error())
 return
 }
 

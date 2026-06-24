@@ -170,6 +170,32 @@ writeErr(w, http.StatusInternalServerError, err.Error())
 return
 }
 
+if result.OK {
+patches_any := make([]map[string]any, len(req.Patches))
+for i, p := range req.Patches {
+patches_any[i] = map[string]any{"path": p.Path, "value": p.Value}
+}
+if commitErr := h.db.CommitTransition(&store.CommitParams{
+WorkflowID:    id,
+Result:        &store.TransitionResult{
+OK:            result.OK,
+StateJSON:     result.StateJSON,
+StateHash:     result.StateHash,
+ReceiptJSON:   result.ReceiptJSON,
+ReceiptDigest: result.ReceiptDigest,
+PolicyOK:      result.PolicyOK,
+Seq:           result.Seq,
+},
+Patches:       patches_any,
+Kind:          "human_state_edit",
+ActorID:       actor.ActorID,
+SnapshotEvery: h.snapshotEvery,
+}); commitErr != nil {
+writeErr(w, http.StatusInternalServerError, "commit failed: "+commitErr.Error())
+return
+}
+}
+
 writeJSON(w, http.StatusOK, map[string]any{
 "ok":         result.OK,
 "state_hash": result.StateHash,
@@ -270,10 +296,13 @@ writeErr(w, http.StatusNotFound, "workflow not found")
 return
 }
 var result struct {
-OK      bool   `json:"ok"`
-Digest  string `json:"digest"`
-StateHash string `json:"state_hash"`
-Seq     int    `json:"seq"`
+OK            bool   `json:"ok"`
+Digest        string `json:"digest"`
+StateJSON     string `json:"state_json"`
+StateHash     string `json:"state_hash"`
+ReceiptJSON   string `json:"receipt_json"`
+ReceiptDigest string `json:"receipt_digest"`
+Seq           int    `json:"seq"`
 }
 _ = h.br.RunAndUnmarshal("commit_artifact.fard", map[string]any{
 "state_json":    snap.StateJSON,
@@ -281,6 +310,28 @@ _ = h.br.RunAndUnmarshal("commit_artifact.fard", map[string]any{
 "artifact_json": string(artifactReq),
 "tool_version":  "tool-gateway-1.0.0",
 }, &result)
+
+if result.OK {
+if commitErr := h.db.CommitArtifact(&store.ArtifactCommitParams{
+WorkflowID:     id,
+ArtifactJSON:   string(artifactReq),
+ArtifactDigest: result.Digest,
+Result: &store.TransitionResult{
+OK:            result.OK,
+StateJSON:     result.StateJSON,
+StateHash:     result.StateHash,
+ReceiptJSON:   result.ReceiptJSON,
+ReceiptDigest: result.ReceiptDigest,
+Seq:           result.Seq,
+},
+ActorID:       actor.ActorID,
+SnapshotEvery: h.snapshotEvery,
+}); commitErr != nil {
+writeErr(w, http.StatusInternalServerError, "commit artifact failed: "+commitErr.Error())
+return
+}
+}
+
 writeJSON(w, http.StatusOK, map[string]any{
 "ok":         result.OK,
 "digest":     result.Digest,
