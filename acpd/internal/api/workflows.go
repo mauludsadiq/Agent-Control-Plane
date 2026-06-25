@@ -13,8 +13,9 @@ import (
 
 type createWorkflowReq struct {
 WorkflowID string `json:"workflow_id"`
-Goal       string `json:"goal"`
-Owner      string `json:"owner"`
+Goal       string         `json:"goal"`
+Owner      string         `json:"owner"`
+Plan       map[string]any `json:"plan"`
 }
 
 type transitionInput struct {
@@ -64,6 +65,7 @@ err := h.br.RunAndUnmarshal("create_workflow.fard", map[string]any{
 "workflow_id": req.WorkflowID,
 "goal":        req.Goal,
 "owner":       req.Owner,
+"plan":        planOrEmpty(req.Plan),
 }, &result)
 if err != nil {
 writeErr(w, http.StatusInternalServerError, "fard bridge error: "+err.Error())
@@ -80,6 +82,17 @@ CurrentSeq:  0,
 SnapshotSeq: 0,
 CreatedAt:   time.Now(),
 UpdatedAt:   time.Now(),
+}
+
+// If a plan was provided, inject it into the initial state JSON
+if req.Plan != nil {
+var stateMap map[string]any
+if jsonErr := json.Unmarshal([]byte(result.StateJSON), &stateMap); jsonErr == nil {
+stateMap["plan"] = req.Plan
+if patched, jsonErr := json.Marshal(stateMap); jsonErr == nil {
+result.StateJSON = string(patched)
+}
+}
 }
 
 if err := h.db.CreateWorkflow(wf); err != nil {
@@ -374,4 +387,64 @@ writeJSON(w, http.StatusOK, map[string]any{
 "state_hash": result.StateHash,
 "seq":        result.Seq,
 })
+}
+
+func (h *Handlers) executePlan(w http.ResponseWriter, r *http.Request, workflowID string) {
+if r.Method != http.MethodPost {
+writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+return
+}
+var req struct {
+Routes []store.ModelRoute `json:"routes"`
+}
+if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+req.Routes = nil // routes optional
+}
+taskIDs, err := h.db.EnqueuePlanTasks(workflowID, req.Routes)
+if err != nil {
+writeErr(w, http.StatusInternalServerError, err.Error())
+return
+}
+writeJSON(w, http.StatusOK, map[string]any{
+"ok":        true,
+"enqueued":  len(taskIDs),
+"task_ids":  taskIDs,
+})
+}
+
+func (h *Handlers) markNodeDone(w http.ResponseWriter, r *http.Request, workflowID, nodeID string) {
+if r.Method != http.MethodPost {
+writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+return
+}
+if err := h.db.MarkPlanNodeDone(workflowID, nodeID); err != nil {
+writeErr(w, http.StatusInternalServerError, err.Error())
+return
+}
+writeJSON(w, http.StatusOK, map[string]any{
+"ok":          true,
+"workflow_id": workflowID,
+"node_id":     nodeID,
+"status":      "done",
+})
+}
+
+// handleModelRoutes returns the default model routing table.
+// In v0.5.0 this is a static default; v0.6.0 will make it configurable per workflow.
+func (h *Handlers) handleModelRoutes(w http.ResponseWriter, r *http.Request) {
+routes := []store.ModelRoute{
+{NodeAgent: "research_agent",    AgentID: "agent:claude-opus",    Model: "claude-opus-4-6"},
+{NodeAgent: "finance_agent",     AgentID: "agent:claude-sonnet",  Model: "claude-sonnet-4-6"},
+{NodeAgent: "legal_agent",       AgentID: "agent:claude-opus",    Model: "claude-opus-4-6"},
+{NodeAgent: "procurement_agent", AgentID: "agent:claude-sonnet",  Model: "claude-sonnet-4-6"},
+{NodeAgent: "manager",           AgentID: "agent:operator",       Model: "human"},
+}
+writeJSON(w, http.StatusOK, map[string]any{"ok": true, "routes": routes})
+}
+
+func planOrEmpty(plan map[string]any) map[string]any {
+if plan != nil {
+return plan
+}
+return map[string]any{"nodes": []any{}, "edges": []any{}}
 }

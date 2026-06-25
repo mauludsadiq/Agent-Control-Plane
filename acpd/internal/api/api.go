@@ -24,6 +24,7 @@ return &Handlers{db: db, br: br, q: q, snapshotEvery: snapshotEvery}
 func (h *Handlers) Register(mux *http.ServeMux) {
 mux.HandleFunc("/workflows", h.handleWorkflows)
 mux.HandleFunc("/workflows/", h.handleWorkflow)
+mux.HandleFunc("/model-routes", h.handleModelRoutes)
 mux.HandleFunc("/tasks/next", h.handleTaskNext)
 mux.HandleFunc("/tasks/", h.handleTask)
 mux.HandleFunc("/operator/inbox", h.handleInbox)
@@ -86,9 +87,16 @@ case "receipts":
 h.getReceipts(w, r, id)
 case "replay":
 h.replayWorkflow(w, r, id)
+case "plan/execute":
+h.executePlan(w, r, id)
 case "tasks":
 h.listWorkflowTasks(w, r, id)
 default:
+if strings.HasPrefix(sub, "plan/nodes/") && strings.HasSuffix(sub, "/done") {
+nodeID := strings.TrimSuffix(strings.TrimPrefix(sub, "plan/nodes/"), "/done")
+h.markNodeDone(w, r, id, nodeID)
+return
+}
 // Check for gates/:token/resume
 if strings.HasPrefix(sub, "gates/") {
 parts := strings.Split(sub, "/")

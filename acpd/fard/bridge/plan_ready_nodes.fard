@@ -1,0 +1,13 @@
+import("std/json") as json
+import("std/io") as io
+import("std/env") as env
+import("plan") as plan
+
+let input_path = env.get("ACP_INPUT_FILE").some in
+let raw = io.read_file(input_path) in
+let input = json.decode(raw) in
+
+let g = input.plan in
+let ready = plan.ready_nodes(g) in
+
+json.encode({ ready_nodes: ready })
