@@ -1,0 +1,38 @@
+import("std/env") as env
+import("std/io") as io
+import("std/json") as json
+import("../../../src/acp/lineage") as lineage
+import("../../../src/acp/receipt") as receipt
+
+let input = json.decode(io.read_file(env.get("ACP_INPUT_FILE").some).ok)
+
+let raw = input.parent_state
+
+let clean_state = {
+  schema:      raw.schema,
+  workflow_id: raw.workflow_id,
+  goal:        raw.goal,
+  owner:       raw.owner,
+  stage:       raw.stage,
+  seq:         raw.seq,
+  plan:        { nodes: [], edges: [] },
+  artifacts:   [],
+  approvals:   [],
+  violations:  [],
+  timeline:    [],
+  variables:   {}
+}
+
+let r = lineage.fork(
+  clean_state,
+  input.new_workflow_id,
+  input.branch_point_seq,
+  input.reason
+)
+
+{
+  ok: r.ok,
+  state_json: json.encode(r.state),
+  state_hash: receipt.digest(r.state),
+  branch: r.branch
+}

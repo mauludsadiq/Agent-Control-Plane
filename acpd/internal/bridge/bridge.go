@@ -6,6 +6,7 @@ import (
 "fmt"
 "os"
 "os/exec"
+	"time"
 
 	"github.com/mauludsadiq/agent-control-plane/acpd/internal/telemetry"
 "path/filepath"
@@ -66,7 +67,9 @@ return nil, fmt.Errorf("create out dir: %w", err)
 defer os.RemoveAll(outDir)
 
 programPath := filepath.Join(b.fardDir, program)
-cmd := exec.Command(b.fardrunBin, "run",
+ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+defer cancel()
+cmd := exec.CommandContext(ctx, b.fardrunBin, "run",
 "--program", programPath,
 "--out", outDir,
 )

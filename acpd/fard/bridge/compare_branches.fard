@@ -1,0 +1,14 @@
+import("std/env") as env
+import("std/io") as io
+import("std/json") as json
+import("../../../src/acp/lineage") as lineage
+
+let input = json.decode(io.read_file(env.get("ACP_INPUT_FILE").some).ok)
+
+let result = lineage.compare_branches(input.original, input.counterfactual)
+
+{
+  ok: true,
+  diverged: result.diverged,
+  summary: result.summary
+}

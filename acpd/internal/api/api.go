@@ -90,6 +90,10 @@ h.replayWorkflow(w, r, id)
 case "plan/execute":
 h.executePlan(w, r, id)
 case "tasks":
+case "fork":
+h.forkWorkflow(w, r, id)
+case "branches":
+h.listBranches(w, r, id)
 h.listWorkflowTasks(w, r, id)
 default:
 if strings.HasPrefix(sub, "plan/nodes/") && strings.HasSuffix(sub, "/done") {

@@ -1,0 +1,29 @@
+import("std/env") as env
+import("std/io") as io
+import("std/json") as json
+import("../../../src/acp/lineage") as lineage
+import("../../../src/acp/policy") as policy
+import("../../../src/acp/runtime") as runtime
+import("../../../src/acp/receipt") as receipt
+
+let input = json.decode(io.read_file(env.get("ACP_INPUT_FILE").some).ok)
+
+let pol = policy.default_enterprise_policy()
+let actor = runtime.actor(input.actor.actor_id, input.actor.roles)
+
+let result = lineage.counterfactual(
+  input.forked_state,
+  pol,
+  actor,
+  input.events,
+  input.tool_version
+)
+
+{
+  ok: result.ok,
+  state_json: json.encode(result.state),
+  state_hash: receipt.digest(result.state),
+  branch_id: result.branch_id,
+  parent_id: result.parent_id,
+  branch_point_seq: result.branch_point_seq
+}
