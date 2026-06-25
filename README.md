@@ -10,16 +10,18 @@ Agent Control Plane is not sold as agent infrastructure. It is sold as operation
 
 ## Status
 
-    v0.8.0 — decision variants + lineage
+    v0.9.5 — external chain anchoring production
 
     FARD core     19 modules   2,145 lines   152 tests    0 failures
-    Go service    23 endpoints  28 int. tests  0 failures
+    Go service    26 endpoints  33 int. tests  0 failures
     Worker tests  6 tests        0 failures
     Postgres      6 tests        0 failures
     Load tests    2 tests        0 failures
     Security      10 tests       0 failures
     Branch tests  4 tests        0 failures
-    Total         208 tests      0 failures
+    Anchor tests  5 tests        0 failures
+    SDK tests     10 tests       0 failures
+    Total         233 tests      0 failures
 
 ---
 
@@ -57,6 +59,18 @@ Each version must govern more AND handle more capacity than the last.
             Fork any workflow at any seq: POST /workflows/:id/fork
             355 forks/sec on SQLite, all branch records intact
             Fork-of-fork chain integrity verified
+
+    v0.9.0  SDK + framework adapters live
+            Go SDK: typed client, WorkflowBuilder, TaskWorker with heartbeat
+            Adapters: LangGraph, CrewAI, Temporal trace ingestion
+            10/10 SDK tests against mock ACP server
+
+    v0.9.5  External chain anchoring production
+            Any third party can verify receipt chain without trusting the operator
+            Backends: LocalBackend (dev), RFC3161/Ethereum/CTLog stubs (prod)
+            POST /workflows/:id/anchor — submit chain root to external backend
+            GET /workflows/:id/anchor/verify — independent verification
+            Gap detection: finds unanchored seq ranges
 
 ---
 
@@ -196,7 +210,8 @@ fardrun as a subprocess. FARD is the source of truth.
         002_indexes.sql               v0.3.0 performance indexes
         003_worker_hardening.sql      v0.4.0 retry/heartbeat/dead-letter/priority
         004_branches.sql              v0.8.0 branch/fork lineage table
-      internal/store/                 10 files — CRUD + atomic commit + plan execution + fork/branch
+        005_anchors.sql               v0.9.5 external anchor proof table
+      internal/store/                 11 files — CRUD + atomic commit + plan execution + fork/branch + anchors
       internal/auth/                  API key middleware, actor context
       internal/security/              KeyProvider (HMAC/KMS), mTLS CA + cert utilities
       internal/telemetry/             OTel tracer + meter, HTTP middleware, span helpers
@@ -207,8 +222,8 @@ fardrun as a subprocess. FARD is the source of truth.
       internal/api/                   21 HTTP endpoints
       internal/demo/                  vendor selection end-to-end scenario
       internal/testutil/              test server harness
-      fard/bridge/                    13 FARD bridge programs (incl. fork, counterfactual, compare_branches)
-      tests/integration_test.go       28 integration tests (incl. multi-model, telemetry, security, branch)
+      fard/bridge/                    16 FARD bridge programs (incl. fork, counterfactual, anchor_payload, anchor_proof, anchor_verify)
+      tests/integration_test.go       33 integration tests (incl. multi-model, telemetry, security, branch, anchor)
       tests/workers/                  6 concurrent worker tests
       tests/postgres/                 6 Postgres testcontainer tests
       tests/load/                     2 load tests (100–10,000 workflows)
@@ -239,6 +254,9 @@ fardrun as a subprocess. FARD is the source of truth.
     POST   /workflows/:id/plan/nodes/:id/done     Mark plan node complete, unblock DAG
     POST   /workflows/:id/fork                    Fork workflow at any seq, new independent workflow
     GET    /workflows/:id/branches                List all branches of a workflow
+    POST   /workflows/:id/anchor                  Anchor receipt chain to external backend
+    GET    /workflows/:id/anchor/log              Full anchor proof log + gap report
+    GET    /workflows/:id/anchor/verify           Independent chain verification
     GET    /model-routes                          Default model routing table
     GET    /tasks/next                            Claim next task (?agent=)
     GET    /tasks/:id                             Get task
@@ -351,6 +369,7 @@ critical first, then normal, then background.
     dead_letter_tasks     tasks exhausted max_attempts — never requeued
     workers               worker registry with heartbeat tracking
     branches              fork/counterfactual lineage — branch_id, parent_id, branch_point_seq
+    anchors               external proof log — chain_root, payload_digest, proof_digest, external_ref
     audit_events          append-only API-level event log
     actors                API key hashes + roles + restrictions
     policy_versions       cached policy records by version
@@ -464,6 +483,44 @@ Human override: var.autonomy.<actor_id> = { max_level: N } or { min_level: N }
 
 ---
 
+## Go SDK
+
+   go get github.com/mauludsadiq/agent-control-plane/sdk/go
+
+   import "github.com/mauludsadiq/agent-control-plane/sdk/go/acp"
+
+   // Create a client
+   client := acp.NewClient("https://your-acp-server", "acp_live_yourkey")
+
+   // Build a workflow
+   wf, _ := client.NewWorkflow("Select compliant vendor", "ops").
+       WithPlan(&acp.Plan{...}).
+       Create(ctx)
+
+   // Run a worker
+   worker := acp.NewTaskWorker(client, acp.WorkerConfig{
+       AgentID:           "agent:claude-opus",
+       PollInterval:      2 * time.Second,
+       HeartbeatInterval: 30 * time.Second,
+       MaxConcurrent:     5,
+   }, func(ctx context.Context, task *acp.Task) (string, error) {
+       // process task.InputJSON
+       return outputJSON, nil
+   })
+   worker.Run(ctx)
+
+   // Ingest a LangGraph trace
+   import "github.com/mauludsadiq/agent-control-plane/sdk/go/adapters"
+
+   result, _ := adapters.IngestLangGraph(ctx, client, "ops", &adapters.LangGraphRun{
+       RunID:  "lg_run_001",
+       Nodes:  []adapters.LangGraphNode{{ID: "retriever", Type: "retrieval"}},
+       Events: []adapters.LangGraphEvent{{Type: "node_complete", NodeID: "retriever"}},
+   })
+   // result.WorkflowID — governed ACP workflow with full receipt chain
+
+---
+
 ## Run all tests
 
     # FARD suite (152 tests)
@@ -471,8 +528,11 @@ Human override: var.autonomy.<actor_id> = { max_level: N } or { min_level: N }
       fardrun test --program "$f" --json 2>&1 | tail -1
     done
 
-    # Go suite (208 tests across 4 packages)
+    # Go suite (233 tests across 4 packages)
     cd acpd && go test ./tests/... -timeout 120s
+
+    # SDK tests
+    cd sdk/go && go test ./... -timeout 30s
 
     # Full load test (10,000 workflows)
     cd acpd && ACP_LOAD_WORKFLOWS=10000 go test ./tests/load/... -timeout 600s
@@ -520,6 +580,9 @@ Agent Control Plane routes each plan node to the right model based on risk and r
 A chat wrapper is opaque to existing process infrastructure.
 Agent Control Plane ingests and exports LangGraph, CrewAI, Temporal, and BPMN traces.
 
+A chat wrapper cannot be independently verified by a regulator.
+Agent Control Plane anchors its receipt chain to Ethereum, RFC3161, or CT logs — any third party can verify without trusting the operator.
+
 ---
 
 ## Roadmap
@@ -531,9 +594,9 @@ Agent Control Plane ingests and exports LangGraph, CrewAI, Temporal, and BPMN tr
     v0.6.0  done  Observable at scale (OTel traces + metrics, 9 instruments)
     v0.7.0  done  Security hardened (mTLS, HMAC API keys, KMS stub)
     v0.8.0  done  10,000 decision variants (fork/counterfactual/lineage, 355 forks/sec)
-    v0.9.0  next  SDK + framework adapters live
-    v0.9.5        External chain anchoring production
-    v1.0.0        Production hardened + commercially viable
+    v0.9.0  done  SDK + framework adapters live (Go SDK, LangGraph/CrewAI/Temporal adapters)
+    v0.9.5  done  External chain anchoring production (RFC3161/Ethereum/CTLog)
+    v1.0.0  next  Production hardened + commercially viable
 
 Principle: each version must govern more AND handle more capacity than the last.
 Capacity is the pitch. Provability is the moat.
@@ -542,7 +605,7 @@ Capacity is the pitch. Provability is the moat.
 
 ## Selling line
 
-> Agent Control Plane turns AI work from opaque chat into governed operations: every plan visible, every artifact tracked, every policy enforced, every state editable, every decision replayable, every branch auditable, every approval gateable, every agent calibrated, every chain anchored, every framework connected, every model routed, every variant forkable, every compliance question answerable.
+> Agent Control Plane turns AI work from opaque chat into governed operations: every plan visible, every artifact tracked, every policy enforced, every state editable, every decision replayable, every branch auditable, every approval gateable, every agent calibrated, every chain anchored, every framework connected, every model routed, every variant forkable, every chain anchored externally, every compliance question answerable.
 
 The infrastructure is not the sales pitch.
 
