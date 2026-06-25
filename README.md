@@ -10,10 +10,10 @@ Agent Control Plane is not sold as agent infrastructure. It is sold as operation
 
 ## Status
 
-    v0.9.5 — external chain anchoring production
+    v1.0.0 — production hardened + commercially viable
 
     FARD core     19 modules   2,145 lines   152 tests    0 failures
-    Go service    26 endpoints  33 int. tests  0 failures
+    Go service    26 endpoints  39 int. tests  0 failures
     Worker tests  6 tests        0 failures
     Postgres      6 tests        0 failures
     Load tests    2 tests        0 failures
@@ -21,7 +21,8 @@ Agent Control Plane is not sold as agent infrastructure. It is sold as operation
     Branch tests  4 tests        0 failures
     Anchor tests  5 tests        0 failures
     SDK tests     10 tests       0 failures
-    Total         233 tests      0 failures
+    Production    6 tests        0 failures
+    Total         239 tests      0 failures
 
 ---
 
@@ -71,6 +72,13 @@ Each version must govern more AND handle more capacity than the last.
             POST /workflows/:id/anchor — submit chain root to external backend
             GET /workflows/:id/anchor/verify — independent verification
             Gap detection: finds unanchored seq ranges
+
+    v1.0.0  Production hardened
+            Structured logging (slog JSON/text), /ready readiness endpoint
+            Rate limiting (token bucket, 100 req/s default, configurable)
+            Body size limits (4MB), ReadHeaderTimeout, graceful shutdown
+            End-to-end proof: 50 concurrent workflows, 150 transitions,
+            50 anchors verified, 50 decision variants, 0 chain breaks
 
 ---
 
@@ -528,7 +536,7 @@ Human override: var.autonomy.<actor_id> = { max_level: N } or { min_level: N }
       fardrun test --program "$f" --json 2>&1 | tail -1
     done
 
-    # Go suite (233 tests across 4 packages)
+    # Go suite (239 tests across 4 packages)
     cd acpd && go test ./tests/... -timeout 120s
 
     # SDK tests
@@ -605,7 +613,7 @@ Capacity is the pitch. Provability is the moat.
 
 ## Selling line
 
-> Agent Control Plane turns AI work from opaque chat into governed operations: every plan visible, every artifact tracked, every policy enforced, every state editable, every decision replayable, every branch auditable, every approval gateable, every agent calibrated, every chain anchored, every framework connected, every model routed, every variant forkable, every chain anchored externally, every compliance question answerable.
+> Agent Control Plane turns AI work from opaque chat into governed operations: every plan visible, every artifact tracked, every policy enforced, every state editable, every decision replayable, every branch auditable, every approval gateable, every agent calibrated, every chain anchored, every framework connected, every model routed, every variant forkable, every chain externally anchored, every compliance question answerable — at scale, in production.
 
 The infrastructure is not the sales pitch.
 
