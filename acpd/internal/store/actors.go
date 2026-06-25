@@ -23,6 +23,14 @@ h := sha256.Sum256([]byte(key))
 return fmt.Sprintf("sha256:%x", h)
 }
 
+// hashAPIKey uses KeyProvider if set, falls back to plain SHA256.
+func (d *DB) hashAPIKey(key string) string {
+   if d.keys != nil {
+   return d.keys.HashAPIKey(key)
+   }
+   return HashAPIKey(key)
+}
+
 func (d *DB) CreateActor(a *Actor, apiKey string) error {
 rolesJSON, _ := json.Marshal(a.Roles)
 agentsJSON, _ := json.Marshal(a.AllowedAgents)
@@ -30,7 +38,7 @@ workflowsJSON, _ := json.Marshal(a.AllowedWorkflows)
 _, err := d.exec(`
 INSERT INTO actors (actor_id, api_key_hash, roles_json, allowed_agents_json, allowed_workflows_json, created_at, updated_at)
 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-a.ActorID, HashAPIKey(apiKey),
+a.ActorID, d.hashAPIKey(apiKey),
 string(rolesJSON), nullBytes(agentsJSON), nullBytes(workflowsJSON),
 now(), now(),
 )
@@ -38,7 +46,7 @@ return err
 }
 
 func (d *DB) ResolveAPIKey(apiKey string) (*Actor, error) {
-hash := HashAPIKey(apiKey)
+hash := d.hashAPIKey(apiKey)
 row := d.queryRow(`
 SELECT actor_id, api_key_hash, roles_json, allowed_agents_json, allowed_workflows_json, created_at, updated_at
 FROM actors WHERE api_key_hash = ?`, hash)

@@ -5,6 +5,26 @@ import (
 "time"
 )
 
+// SignGateToken wraps a FARD-generated gate digest with HMAC.
+// The signed token is what gets stored and what callers must present.
+func (d *DB) SignGateToken(fardDigest string) (string, error) {
+   if d.keys != nil {
+   return d.keys.SignToken(fardDigest)
+   }
+   // No KeyProvider — store the raw digest (dev/test fallback)
+   return fardDigest, nil
+}
+
+// VerifyGateToken checks that a presented token is valid for the stored signature.
+// If no KeyProvider, falls back to direct equality check.
+func (d *DB) VerifyGateToken(presented, stored string) bool {
+   if d.keys != nil {
+   // presented is the FARD digest, stored is the HMAC signature
+   return d.keys.VerifyToken(presented, stored)
+   }
+   return presented == stored
+}
+
 type Gate struct {
 Token      string
 WorkflowID string

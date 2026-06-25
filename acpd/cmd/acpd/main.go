@@ -14,6 +14,7 @@ import (
 "time"
 
 "github.com/mauludsadiq/agent-control-plane/acpd/internal/api"
+	"github.com/mauludsadiq/agent-control-plane/acpd/internal/security"
 	"github.com/mauludsadiq/agent-control-plane/acpd/internal/telemetry"
 "github.com/mauludsadiq/agent-control-plane/acpd/internal/auth"
 "github.com/mauludsadiq/agent-control-plane/acpd/internal/bridge"
@@ -58,6 +59,14 @@ if err != nil {
 log.Fatalf("open db: %v", err)
 }
 defer db.Close()
+
+	// Init KeyProvider — HMAC signing for API keys and gate tokens
+	kp, kpErr := security.DefaultProvider()
+	if kpErr != nil {
+		log.Fatalf("security key provider: %v", kpErr)
+	}
+	db.SetKeyProvider(kp)
+	log.Printf("security: key provider initialised")
 
 if *seed {
 if *seedKey == "" {

@@ -8,12 +8,15 @@ import (
 "time"
 
 _ "github.com/jackc/pgx/v5/stdlib"
-_ "github.com/mattn/go-sqlite3"
+	_ "github.com/mattn/go-sqlite3"
+
+	"github.com/mauludsadiq/agent-control-plane/acpd/internal/security"
 )
 
 type DB struct {
 sql    *sql.DB
 driver string
+keys   security.KeyProvider
 }
 
 // MigrationDir is set by main before calling Open.
@@ -68,6 +71,8 @@ func (d *DB) IsPostgres() bool { return d.driver == "pgx" }
 func (d *DB) IsSQLite() bool   { return d.driver == "sqlite3" }
 func (d *DB) Close() error      { return d.sql.Close() }
 func (d *DB) RawDB() *sql.DB    { return d.sql }
+func (d *DB) SetKeyProvider(kp security.KeyProvider) { d.keys = kp }
+func (d *DB) Keys() security.KeyProvider             { return d.keys }
 
 func (d *DB) migrate() error {
 entries, err := os.ReadDir(MigrationDir)
