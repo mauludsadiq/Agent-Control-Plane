@@ -57,7 +57,11 @@ func NewTestServer(t *testing.T) (*httptest.Server, *store.DB) {
    authMW := auth.Middleware(db)
    handlers := api.New(db, br, q, 10)
    handlers.Register(mux)
-   mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+   mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
+   w.Header().Set("Content-Type", "application/json")
+   json.NewEncoder(w).Encode(map[string]any{"ok": true, "version": "1.0.0", "db": "ok"})
+})
+mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
    w.Header().Set("Content-Type", "application/json")
    fmt.Fprint(w, `{"ok":true,"version":"0.2.0"}`)
    })
