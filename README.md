@@ -179,15 +179,17 @@ fardrun as a subprocess. FARD is the source of truth.
         001_initial.postgres.sql      Postgres variant
         002_indexes.sql               v0.3.0 performance indexes
         003_worker_hardening.sql      v0.4.0 retry/heartbeat/dead-letter/priority
-      internal/store/                 9 files — CRUD + atomic commit + plan execution
+      internal/store/                 10 files — CRUD + atomic commit + plan execution + fork/branch
       internal/auth/                  API key middleware, actor context
+     internal/security/              KeyProvider (HMAC/KMS), mTLS CA + cert utilities
+     internal/telemetry/             OTel tracer + meter, HTTP middleware, span helpers
       internal/bridge/                fardrun subprocess bridge
       internal/queue/                 heartbeat-aware requeue loop, dead letter
       internal/api/                   21 HTTP endpoints
       internal/demo/                  vendor selection end-to-end scenario
       internal/testutil/              test server harness
-      fard/bridge/                    10 FARD bridge programs
-      tests/integration_test.go       24 integration tests
+      fard/bridge/                    13 FARD bridge programs (incl. fork, counterfactual, compare_branches)
+      tests/integration_test.go       28 integration tests (incl. multi-model, telemetry, security, branch)
       tests/workers/                  6 concurrent worker tests
       tests/postgres/                 6 Postgres testcontainer tests
       tests/load/                     2 load tests (100–10,000 workflows)
@@ -518,7 +520,7 @@ Capacity is the pitch. Provability is the moat.
 
 ## Selling line
 
-> Agent Control Plane turns AI work from opaque chat into governed operations: every plan visible, every artifact tracked, every policy enforced, every state editable, every decision replayable, every branch auditable, every approval gateable, every agent calibrated, every chain anchored, every framework connected, every model routed, every compliance question answerable.
+> Agent Control Plane turns AI work from opaque chat into governed operations: every plan visible, every artifact tracked, every policy enforced, every state editable, every decision replayable, every branch auditable, every approval gateable, every agent calibrated, every chain anchored, every framework connected, every model routed, every variant forkable, every compliance question answerable.
 
 The infrastructure is not the sales pitch.
 
