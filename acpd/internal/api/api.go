@@ -92,6 +92,12 @@ h.executePlan(w, r, id)
 case "tasks":
 case "fork":
 h.forkWorkflow(w, r, id)
+case "anchor":
+h.anchorWorkflow(w, r, id)
+case "anchor/log":
+h.getAnchorLog(w, r, id)
+case "anchor/verify":
+h.verifyAnchor(w, r, id)
 case "branches":
 h.listBranches(w, r, id)
 h.listWorkflowTasks(w, r, id)

@@ -1,0 +1,17 @@
+import("std/env") as env
+import("std/io") as io
+import("std/json") as json
+import("../../../src/acp/anchor") as anchor
+
+let input = json.decode(io.read_file(env.get("ACP_INPUT_FILE").some).ok)
+
+let result = anchor.verify_proof(input.proof, input.receipts)
+
+{
+  ok: result.ok,
+  payload_ok: result.payload_ok,
+  proof_digest_matches: result.proof_digest_matches,
+  root_matches: result.root_matches,
+  digest_matches: result.digest_matches,
+  external_ref: result.external_ref
+}

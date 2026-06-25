@@ -1,0 +1,24 @@
+import("std/env") as env
+import("std/io") as io
+import("std/json") as json
+import("../../../src/acp/anchor") as anchor
+import("../../../src/acp/receipt") as receipt
+
+let input = json.decode(io.read_file(env.get("ACP_INPUT_FILE").some).ok)
+
+let chain_root = receipt.chain_root(input.receipts)
+
+let payload = anchor.make_payload(
+  input.workflow_id,
+  input.seq_from,
+  input.seq_to,
+  chain_root,
+  input.policy_version
+)
+
+{
+  ok: true,
+  payload_json: json.encode(payload),
+  payload_digest: payload.payload_digest,
+  chain_root: chain_root
+}
