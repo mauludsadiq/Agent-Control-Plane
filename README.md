@@ -156,7 +156,7 @@ Demo output:
       compliance reports
 
     Go service (acpd/)          owns the product layer
-      HTTP API (21 endpoints)
+      HTTP API (26 endpoints)
       SQLite / Postgres storage (dual-driver, dialect-safe)
       API-key auth
       pull-based task queue with heartbeat + dead letter
@@ -223,11 +223,9 @@ fardrun as a subprocess. FARD is the source of truth.
       internal/auth/                  API key middleware, actor context
       internal/security/              KeyProvider (HMAC/KMS), mTLS CA + cert utilities
       internal/telemetry/             OTel tracer + meter, HTTP middleware, span helpers
-     internal/security/              KeyProvider (HMAC/KMS), mTLS CA + cert utilities
-     internal/telemetry/             OTel tracer + meter, HTTP middleware, span helpers
       internal/bridge/                fardrun subprocess bridge
       internal/queue/                 heartbeat-aware requeue loop, dead letter
-      internal/api/                   21 HTTP endpoints
+      internal/api/                   26 HTTP endpoints
       internal/demo/                  vendor selection end-to-end scenario
       internal/testutil/              test server harness
       fard/bridge/                    16 FARD bridge programs (incl. fork, counterfactual, anchor_payload, anchor_proof, anchor_verify)
@@ -240,7 +238,7 @@ fardrun as a subprocess. FARD is the source of truth.
       docker/Dockerfile               two-stage build, alpine runtime
       docker/docker-compose.yml       single-service compose with healthcheck
 
-    sdk/openapi/acp.openapi.json      v2.0.0 — 21 endpoints, 30 typed schemas
+    sdk/openapi/acp.openapi.json      v2.0.0 — 26 endpoints, 30 typed schemas
     docs/ARCHITECTURE.md
     examples/vendor_selection.fard
 
