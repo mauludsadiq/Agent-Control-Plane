@@ -1,10 +1,13 @@
 package store
 
 import (
+"context"
 "crypto/sha256"
 "database/sql"
 "encoding/json"
 "fmt"
+
+"github.com/mauludsadiq/agent-control-plane/acpd/internal/telemetry"
 )
 
 // TransitionResult is the output of a FARD bridge transition call.
@@ -40,6 +43,12 @@ SnapshotEvery int // take full snapshot every N transitions
 // If any write fails the entire transaction rolls back.
 // The store never holds a partially committed transition.
 func (d *DB) CommitTransition(p *CommitParams) error {
+   return telemetry.TraceCommit(context.Background(), p.WorkflowID, func(ctx context.Context) error {
+   return d.commitTransitionInner(p)
+   })
+}
+
+func (d *DB) commitTransitionInner(p *CommitParams) error {
 return d.Tx(func(tx *sql.Tx) error {
 // 1. Get current workflow state for prev hashes
 var currentSeq, snapshotSeq int

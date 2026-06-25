@@ -1,10 +1,13 @@
 package bridge
 
 import (
+	"context"
 "encoding/json"
 "fmt"
 "os"
 "os/exec"
+
+	"github.com/mauludsadiq/agent-control-plane/acpd/internal/telemetry"
 "path/filepath"
 )
 
@@ -30,6 +33,16 @@ outDir:     outDir,
 // the result JSON. Each call writes input to a temp file, runs fardrun,
 // and reads result.json from the output directory.
 func (b *Bridge) Run(program string, input any) (json.RawMessage, error) {
+   var result json.RawMessage
+   err := telemetry.TraceBridge(context.Background(), program, func(ctx context.Context) error {
+   var runErr error
+   result, runErr = b.runInner(program, input)
+   return runErr
+   })
+   return result, err
+}
+
+func (b *Bridge) runInner(program string, input any) (json.RawMessage, error) {
 // Write input to temp file
 inputJSON, err := json.Marshal(input)
 if err != nil {

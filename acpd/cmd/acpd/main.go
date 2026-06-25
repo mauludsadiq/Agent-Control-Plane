@@ -14,6 +14,7 @@ import (
 "time"
 
 "github.com/mauludsadiq/agent-control-plane/acpd/internal/api"
+	"github.com/mauludsadiq/agent-control-plane/acpd/internal/telemetry"
 "github.com/mauludsadiq/agent-control-plane/acpd/internal/auth"
 "github.com/mauludsadiq/agent-control-plane/acpd/internal/bridge"
 "github.com/mauludsadiq/agent-control-plane/acpd/internal/queue"
@@ -92,6 +93,7 @@ authMW := auth.Middleware(db)
 
 handlers := api.New(db, br, q, *snapshotEvery)
 handlers.Register(mux)
+	var handler http.Handler = telemetry.HTTPMiddleware(mux)
 
 mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 w.Header().Set("Content-Type", "application/json")
@@ -103,7 +105,8 @@ _ = json.NewEncoder(w).Encode(map[string]any{
 })
 })
 
-srv := &http.Server{
+_ = handler // used below
+	srv := &http.Server{
 Addr:         *addr,
 Handler:      authMW(mux),
 ReadTimeout:  30 * time.Second,

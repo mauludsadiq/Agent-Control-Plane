@@ -1,9 +1,15 @@
 package store
 
 import (
+	"context"
 "database/sql"
 "fmt"
 "time"
+
+	"github.com/mauludsadiq/agent-control-plane/acpd/internal/telemetry"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 )
 
 type Task struct {
@@ -111,6 +117,10 @@ return fmt.Errorf("read claimed task: %w", err)
 claimed = t
 return nil
 })
+if err == nil && claimed != nil && telemetry.TasksClaimed != nil {
+telemetry.TasksClaimed.Add(context.Background(), 1,
+metric.WithAttributes(attribute.String("agent", agent)))
+}
 return claimed, err
 }
 
