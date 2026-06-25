@@ -10,14 +10,16 @@ Agent Control Plane is not sold as agent infrastructure. It is sold as operation
 
 ## Status
 
-    v0.5.0 — multi-model workflows
+    v0.8.0 — decision variants + lineage
 
     FARD core     19 modules   2,145 lines   152 tests    0 failures
-    Go service    21 endpoints  24 int. tests  0 failures
+    Go service    23 endpoints  28 int. tests  0 failures
     Worker tests  6 tests        0 failures
     Postgres      6 tests        0 failures
     Load tests    2 tests        0 failures
-    Total         190 tests      0 failures
+    Security      10 tests       0 failures
+    Branch tests  4 tests        0 failures
+    Total         208 tests      0 failures
 
 ---
 
@@ -41,6 +43,20 @@ Each version must govern more AND handle more capacity than the last.
             DAG plan execution: ready_nodes computed from blocker graph
             Per-node model routing: research → claude-opus, finance → claude-sonnet
             finance + legal tasks blocked until research node marked done
+
+    v0.6.0  Observable at scale
+            OTel traces on every HTTP request, commit, bridge call, task claim
+            9 instruments: counters + histograms across workflows, tasks, HTTP
+
+    v0.7.0  Security hardened
+            HMAC-keyed API key hashes (ACP_MASTER_KEY), signed gate tokens
+            mTLS: CA generation, cert issuance, TLS 1.3, RequireAndVerifyClientCert
+            10/10 security tests: forgery rejected, untrusted CA rejected
+
+    v0.8.0  10,000 decision variants
+            Fork any workflow at any seq: POST /workflows/:id/fork
+            355 forks/sec on SQLite, all branch records intact
+            Fork-of-fork chain integrity verified
 
 ---
 
@@ -179,8 +195,11 @@ fardrun as a subprocess. FARD is the source of truth.
         001_initial.postgres.sql      Postgres variant
         002_indexes.sql               v0.3.0 performance indexes
         003_worker_hardening.sql      v0.4.0 retry/heartbeat/dead-letter/priority
+        004_branches.sql              v0.8.0 branch/fork lineage table
       internal/store/                 10 files — CRUD + atomic commit + plan execution + fork/branch
       internal/auth/                  API key middleware, actor context
+      internal/security/              KeyProvider (HMAC/KMS), mTLS CA + cert utilities
+      internal/telemetry/             OTel tracer + meter, HTTP middleware, span helpers
      internal/security/              KeyProvider (HMAC/KMS), mTLS CA + cert utilities
      internal/telemetry/             OTel tracer + meter, HTTP middleware, span helpers
       internal/bridge/                fardrun subprocess bridge
@@ -218,6 +237,8 @@ fardrun as a subprocess. FARD is the source of truth.
     POST   /workflows/:id/gates/:token/resume     Resume or reject gate
     POST   /workflows/:id/plan/execute            Enqueue ready plan nodes as tasks
     POST   /workflows/:id/plan/nodes/:id/done     Mark plan node complete, unblock DAG
+    POST   /workflows/:id/fork                    Fork workflow at any seq, new independent workflow
+    GET    /workflows/:id/branches                List all branches of a workflow
     GET    /model-routes                          Default model routing table
     GET    /tasks/next                            Claim next task (?agent=)
     GET    /tasks/:id                             Get task
@@ -329,6 +350,7 @@ critical first, then normal, then background.
     tasks                 pull-based worker queue with claim/timeout/requeue/heartbeat
     dead_letter_tasks     tasks exhausted max_attempts — never requeued
     workers               worker registry with heartbeat tracking
+    branches              fork/counterfactual lineage — branch_id, parent_id, branch_point_seq
     audit_events          append-only API-level event log
     actors                API key hashes + roles + restrictions
     policy_versions       cached policy records by version
@@ -449,7 +471,7 @@ Human override: var.autonomy.<actor_id> = { max_level: N } or { min_level: N }
       fardrun test --program "$f" --json 2>&1 | tail -1
     done
 
-    # Go suite (38 tests across 4 packages)
+    # Go suite (208 tests across 4 packages)
     cd acpd && go test ./tests/... -timeout 120s
 
     # Full load test (10,000 workflows)
@@ -506,10 +528,10 @@ Agent Control Plane ingests and exports LangGraph, CrewAI, Temporal, and BPMN tr
     v0.3.0  done  10,000 workflows (Postgres + load tests)
     v0.4.0  done  100 concurrent agents (heartbeat, dead letter, priority lanes)
     v0.5.0  done  Multi-model workflows (DAG routing, per-node model assignment)
-    v0.6.0  next  Observable at scale (OpenTelemetry traces + metrics)
-    v0.7.0        Security hardened (mTLS, KMS key rotation)
-    v0.8.0        10,000 decision variants (lineage + counterfactual at scale)
-    v0.9.0        SDK + framework adapters live
+    v0.6.0  done  Observable at scale (OTel traces + metrics, 9 instruments)
+    v0.7.0  done  Security hardened (mTLS, HMAC API keys, KMS stub)
+    v0.8.0  done  10,000 decision variants (fork/counterfactual/lineage, 355 forks/sec)
+    v0.9.0  next  SDK + framework adapters live
     v0.9.5        External chain anchoring production
     v1.0.0        Production hardened + commercially viable
 
