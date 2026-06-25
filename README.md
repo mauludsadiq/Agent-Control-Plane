@@ -639,7 +639,7 @@ Agent Control Plane anchors its receipt chain to Ethereum, RFC3161, or CT logs �
 
 ## Selling line
 
-> Agent Control Plane turns AI work from opaque chat into governed operations: every plan visible, every artifact tracked, every policy enforced, every state editable, every decision replayable, every branch auditable, every approval gateable, every agent calibrated, every chain anchored, every framework connected, every model routed, every variant forkable, every chain externally anchored, every compliance question answerable — at scale, in production.
+> Agent Control Plane turns AI work from opaque chat into governed operations: every plan visible, every artifact tracked, every policy enforced, every state editable, every decision replayable, every branch auditable, every approval gateable, every agent calibrated, every model routed, every variant forkable, every framework connected, every chain externally anchored, every compliance question answerable — at scale, in production.
 
 The infrastructure is not the sales pitch.
 
