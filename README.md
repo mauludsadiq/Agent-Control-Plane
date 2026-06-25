@@ -593,21 +593,49 @@ Agent Control Plane anchors its receipt chain to Ethereum, RFC3161, or CT logs �
 
 ---
 
-## Roadmap
+## Features
 
-    v0.2.0  done  Proven correct + operable
-    v0.3.0  done  10,000 workflows (Postgres + load tests)
-    v0.4.0  done  100 concurrent agents (heartbeat, dead letter, priority lanes)
-    v0.5.0  done  Multi-model workflows (DAG routing, per-node model assignment)
-    v0.6.0  done  Observable at scale (OTel traces + metrics, 9 instruments)
-    v0.7.0  done  Security hardened (mTLS, HMAC API keys, KMS stub)
-    v0.8.0  done  10,000 decision variants (fork/counterfactual/lineage, 355 forks/sec)
-    v0.9.0  done  SDK + framework adapters live (Go SDK, LangGraph/CrewAI/Temporal adapters)
-    v0.9.5  done  External chain anchoring production (RFC3161/Ethereum/CTLog)
-    v1.0.0  next  Production hardened + commercially viable
+    Governance
+      Policy-gated state transitions — invalid states blocked regardless of model output
+      Tamper-evident receipt chain — SHA256-linked, insertion or reordering detected
+      Async policy gates — workflow gated, runtime released, resumed on callback
+      Staged autonomy — agent permissions expand based on verified historical performance
+      9-section compliance report with evidence digest — auditable without trust
 
-Principle: each version must govern more AND handle more capacity than the last.
-Capacity is the pitch. Provability is the moat.
+    Scale
+      10,000 workflows — SQLite or Postgres, 178 tx/sec, 0 chain breaks
+      100 concurrent agents — atomic claim, heartbeat, dead letter, priority lanes
+      10,000 decision variants — fork at any seq, 355 forks/sec, chain integrity
+      Multi-model DAG — per-node model routing, finance+legal blocked until research done
+
+    Observability
+      OpenTelemetry traces on every HTTP request, commit, bridge call, task claim
+      9 instruments: workflow/task/commit/bridge/HTTP counters + histograms
+      Structured logging (slog JSON/text), /health + /ready endpoints
+
+    Security
+      HMAC-keyed API key hashes (ACP_MASTER_KEY) — DB read does not reveal keys
+      Signed gate tokens — HMAC-SHA256, not plain SHA256
+      mTLS — CA generation, cert issuance, TLS 1.3, RequireAndVerifyClientCert
+      KMSKeyProvider stub — wire in AWS KMS / GCP KMS / Vault
+
+    Anchoring
+      External chain anchoring — receipt chain root published to external backend
+      Backends: LocalBackend (dev), RFC3161, Ethereum, CT Log stubs
+      Independent verification — any third party verifies without trusting operator
+      Gap detection — finds unanchored seq ranges
+
+    SDK + Adapters
+      Go SDK — typed client, WorkflowBuilder, TaskWorker with heartbeat loop
+      LangGraph, CrewAI, Temporal trace ingestion
+      BPMN import — gateway filtering, variable extraction, incident mapping
+      OpenAPI v2.0 spec — 26 endpoints, 30 typed schemas
+
+    Production
+      Rate limiting (token bucket, 100 req/s default, configurable)
+      Body size limits (4MB max), ReadHeaderTimeout, graceful 10s shutdown
+      Docker two-stage alpine build, healthcheck
+      ACP_MASTER_KEY, ACP_KMS_KEY_ID, ACP_ANCHOR_BACKEND env var config
 
 ---
 
